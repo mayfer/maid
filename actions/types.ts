@@ -9,5 +9,5 @@ export interface Action {
     handler: (params: {
         parameters: any;
         sessionName: string;
-    }) => Promise<void>;
+    }) => Promise<any>;
 } 

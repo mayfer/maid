@@ -74,14 +74,23 @@ async function isTerminalIdle(session, lastContent) {
 }
 
 // Function to handle LLM interaction and user input
-async function handleTerminalState(screenContent, sessionName) {
+async function handleTerminalState(screenContent, sessionName, actionResults) {
     try {
+        let contextMessage = `Here is the current terminal screen content:\n\n${screenContent}\n\nWhat do you see? Keep response very brief and concise.`;
+        
+        // Add action results to context if available
+        if (actionResults && actionResults.length > 0) {
+            contextMessage += `\n\nResults from previous actions:\n${actionResults.map(result => 
+                `- ${result.actionName}: ${result.result}`
+            ).join('\n')}`;
+        }
+
         const result = await promptLLM({
             modelPreset,
             messages: [
                 {
                     role: 'user',
-                    content: `Here is the current terminal screen content:\n\n${screenContent}\n\nWhat do you see? Keep response very brief and concise.
+                    content: `${contextMessage}
 
 Available actions:
 ${JSON.stringify(actions, null, 2)}
@@ -137,16 +146,32 @@ Your thoughts about what you see and what to do...
         if (actionsMatch) {
             try {
                 const actionsList = JSON.parse(actionsMatch[1]);
+                const currentActionResults: { actionName: string; result: string }[] = [];
+                
                 for (const action of actionsList) {
                     const actionDef = actions.find(a => a.name === action.name);
                     if (actionDef) {
-                        await actionDef.handler({
+                        const result = await actionDef.handler({
                             parameters: action.parameters,
                             sessionName
                         });
+                        
+                        // Collect results for potential follow-up
+                        if (result !== undefined && result !== null) {
+                            currentActionResults.push({
+                                actionName: action.name,
+                                result: result
+                            });
+                        }
                     } else {
                         console.log(`Action ${action.name} not found or not available`);
                     }
+                }
+                
+                // If we have action results, trigger another LLM interaction
+                if (currentActionResults.length > 0) {
+                    console.log('\nAction results collected, continuing with LLM...');
+                    await handleTerminalState(screenContent, sessionName, currentActionResults);
                 }
             } catch (error) {
                 console.error('Error parsing actions:', error);
@@ -183,7 +208,7 @@ async function monitorTerminalState(sessionName) {
             // Check if terminal has been idle for 2 seconds
             if (Date.now() - lastStateChange >= 2000) {
                 isIdle = true;
-                await handleTerminalState(screenContent, sessionName);
+                await handleTerminalState(screenContent, sessionName, null);
             }
         }
 

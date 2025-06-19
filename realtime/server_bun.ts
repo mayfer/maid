@@ -2,6 +2,7 @@ import { serve, sql } from "bun";
 import App from "./index.html";
 import mime from "mime-types";
 import { Command } from 'commander';
+import axios from 'axios';
 
 const program = new Command();
 
@@ -76,24 +77,22 @@ serve({
             }
 
             try {
-                const response = await fetch(
+                const response = await axios.post(
                     "https://api.openai.com/v1/realtime/sessions",
                     {
-                        method: "POST",
+                        model: "gpt-4o-realtime-preview",
+                        voice: "alloy",
+                        // turn_detection: { silence_duration_ms: 2500 },
+                    },
+                    {
                         headers: {
                             Authorization: `Bearer ${apiKey}`,
                             "Content-Type": "application/json",
                         },
-                        body: JSON.stringify({
-                            model: "gpt-4o-realtime-preview",
-                            voice: "alloy",
-                            // turn_detection: { silence_duration_ms: 2500 },
-                        }),
-                    },
+                    }
                 );
 
-                const data = await response.json();
-                return jsonResponse(data);
+                return jsonResponse(response.data);
             } catch (error) {
                 console.error("Token generation error:", error);
                 return jsonResponse({ error: "Failed to generate token" }, 500);

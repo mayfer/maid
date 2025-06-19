@@ -24,16 +24,16 @@ const modelPreset = {
 };
 
 // Start tmux server and wait for it to be ready
-async function startTmuxServer() {
+async function startTmuxServer(): Promise<void> {
     return new Promise((resolve, reject) => {
         const tmux = spawn('tmux', ['start-server']);
         
-        tmux.on('error', (error) => {
+        tmux.on('error', (error: Error) => {
             console.error('Failed to start tmux server:', error);
             reject(error);
         });
 
-        tmux.on('close', (code) => {
+        tmux.on('close', (code: number | null) => {
             if (code === 0) {
                 // Give tmux a moment to fully start
                 setTimeout(resolve, 1000);
@@ -45,17 +45,18 @@ async function startTmuxServer() {
 }
 
 // Utility to execute tmux commands and capture output
-async function tmuxCommand(command, options = {}) {
+async function tmuxCommand(command: string, options: any = {}): Promise<string> {
     try {
         return execSync(`tmux ${command}`, { encoding: 'utf8', ...options }).trim();
     } catch (error) {
-        console.error(`Error executing tmux command: ${error.message}`);
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        console.error(`Error executing tmux command: ${errorMessage}`);
         throw error;
     }
 }
 
 // Capture pane output for a session
-async function capturePane(session) {
+async function capturePane(session: string): Promise<string | null> {
     try {
         return await tmuxCommand(`capture-pane -t ${session} -p`);
     } catch (error) {
@@ -65,7 +66,7 @@ async function capturePane(session) {
 }
 
 // Function to detect if terminal is idle (no changes for 2 seconds)
-async function isTerminalIdle(session, lastContent) {
+async function isTerminalIdle(session: string, lastContent: string): Promise<boolean> {
     const currentContent = await capturePane(session);
     if (currentContent === lastContent) {
         return true;
@@ -73,14 +74,19 @@ async function isTerminalIdle(session, lastContent) {
     return false;
 }
 
+interface ActionResult {
+    actionName: string;
+    result: string;
+}
+
 // Function to handle LLM interaction and user input
-async function handleTerminalState(screenContent, sessionName, actionResults) {
+async function handleTerminalState(screenContent: string, sessionName: string, actionResults: ActionResult[] | null): Promise<void> {
     try {
         let contextMessage = `Here is the current terminal screen content:\n\n${screenContent}\n\nWhat do you see? Keep response very brief and concise.`;
         
         // Add action results to context if available
         if (actionResults && actionResults.length > 0) {
-            contextMessage += `\n\nResults from previous actions:\n${actionResults.map(result => 
+            contextMessage += `\n\nResults from previous actions:\n${actionResults.map((result: ActionResult) => 
                 `- ${result.actionName}: ${result.result}`
             ).join('\n')}`;
         }
@@ -133,7 +139,7 @@ Your thoughts about what you see and what to do...
         console.log('-------------');
         
         let fullResponse = '';
-        result.onDelta((chunk) => {
+        result.onDelta((chunk: string) => {
             process.stdout.write(chunk);
             fullResponse += chunk;
         });
@@ -146,10 +152,10 @@ Your thoughts about what you see and what to do...
         if (actionsMatch) {
             try {
                 const actionsList = JSON.parse(actionsMatch[1]);
-                const currentActionResults: { actionName: string; result: string }[] = [];
+                const currentActionResults: ActionResult[] = [];
                 
                 for (const action of actionsList) {
-                    const actionDef = actions.find(a => a.name === action.name);
+                    const actionDef = actions.find((a: any) => a.name === action.name);
                     if (actionDef) {
                         const result = await actionDef.handler({
                             parameters: action.parameters,
@@ -183,7 +189,7 @@ Your thoughts about what you see and what to do...
 }
 
 // Function to monitor terminal state changes
-async function monitorTerminalState(sessionName) {
+async function monitorTerminalState(sessionName: string): Promise<void> {
     let lastContent = '';
     let isIdle = false;
     let lastStateChange = Date.now();
@@ -216,7 +222,7 @@ async function monitorTerminalState(sessionName) {
     }
 }
 
-async function main() {
+async function main(): Promise<void> {
     try {
         // Start tmux server
         console.log('Starting tmux server...');
@@ -236,7 +242,8 @@ async function main() {
             await tmuxCommand(`new-session -d -s ${sessionName}`);
             console.log(`Created new tmux session: ${sessionName}`);
         } catch (error) {
-            console.error('Failed to create session:', error.message);
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            console.error('Failed to create session:', errorMessage);
             process.exit(1);
         }
 
@@ -245,7 +252,8 @@ async function main() {
             await tmuxCommand(`send-keys -t ${sessionName} "${selectedAgent}" Enter`);
             console.log(`Started ${selectedAgent} in tmux session`);
         } catch (error) {
-            console.error(`Failed to start ${selectedAgent}:`, error.message);
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            console.error(`Failed to start ${selectedAgent}:`, errorMessage);
             process.exit(1);
         }
 

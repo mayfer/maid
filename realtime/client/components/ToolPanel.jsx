@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import styled from 'styled-components';
+import axios from 'axios';
 
 const PanelContainer = styled.section`
   height: 100%;
@@ -89,7 +90,7 @@ export default function ToolPanel({
       mostRecentEvent.type === "response.done" &&
       mostRecentEvent.response.output
     ) {
-      mostRecentEvent.response.output.forEach((output) => {
+      mostRecentEvent.response.output.forEach(async (output) => {
         console.log("output", output);
         if (output.type === "function_call" && (output.name === "plan_changes" || output.name === "apply_changes")) {
           // Use call_id to track processed calls; if not available, fallback to a combination of name and timestamp
@@ -107,10 +108,10 @@ export default function ToolPanel({
           // Add debugging to see the structure
           console.log("Function call arguments:", output.arguments);
           
-          // Make HTTP call to the server
-          // Parse arguments properly - it might be a string that needs parsing
-          let promptValue;
+          // Make HTTP call to the server using axios
           try {
+            // Parse arguments properly - it might be a string that needs parsing
+            let promptValue;
             // Check if arguments is a string (JSON) or an object
             if (typeof output.arguments === 'string') {
               const parsedArgs = JSON.parse(output.arguments);
@@ -132,76 +133,55 @@ export default function ToolPanel({
             }
 
             const url = output.name === "plan_changes" ? "/claudecode/plan" : "/claudecode/apply";
-            fetch(url, {
-              method: 'POST',
+            
+            const response = await axios.post(url, {
+              prompt: promptValue
+            }, {
               headers: {
                 'Content-Type': 'application/json',
               },
-              body: JSON.stringify({ prompt: promptValue }),
-            })
-              .then(response => response.json())
-              .then(data => {
-                busyMap[output.name] = false;
-                // Update state with response
-                if(output.name === "plan_changes") {
-                  setPlan(data.plan);
-                } else if(output.name === "apply_changes") {
-                  setChanges(data.changes);
-                }
-                setIsProcessing(false);
-                
-                // Build the payload expected by the OpenAI Realtime docs for a function result.
-                const functionResultEvent = {
-                  type: "conversation.item.create",
-                  item: {
-                    type: "function_call_output",
-                    call_id: output.call_id || callId,
-                    // 'name' is not required for function_call_output per Realtime API spec
-                    output: JSON.stringify(data),
-                  },
-                };
+            });
 
-                // 1) Send the function_result back to the model so it can continue the conversation.
-                sendClientEvent(functionResultEvent);
+            const data = response.data;
+            busyMap[output.name] = false;
+            
+            // Update state with response
+            if(output.name === "plan_changes") {
+              setPlan(data.plan);
+            } else if(output.name === "apply_changes") {
+              setChanges(data.changes);
+            }
+            setIsProcessing(false);
+            
+            // Build the payload expected by the OpenAI Realtime docs for a function result.
+            const functionResultEvent = {
+              type: "conversation.item.create",
+              item: {
+                type: "function_call_output",
+                call_id: output.call_id || callId,
+                // 'name' is not required for function_call_output per Realtime API spec
+                output: JSON.stringify(data),
+              },
+            };
 
-                // 2) Ask the model to produce a concise natural-language summary.
-                const summaryInstructions =
-                  output.name === "plan_changes"
-                    ? "Summarize the provided plan in one short sentence, listing the files that will be changed (paths relative to the project root)."
-                    : "Summarize the code diff succinctly – what changed and in which files (paths relative to the project root).";
+            // 1) Send the function_result back to the model so it can continue the conversation.
+            sendClientEvent(functionResultEvent);
 
-                sendClientEvent({
-                  type: "response.create",
-                  response: {
-                    instructions: summaryInstructions,
-                  },
-                });
-              })
-              .catch(error => {
-                busyMap[output.name] = false;
-                console.error("Error planning changes:", error);
-                setIsProcessing(false);
-                sendClientEvent({
-                  type: "conversation.item.create",
-                  item: {
-                    type: "function_call_output",
-                    call_id: output.call_id || callId,
-                    // 'name' is not required for function_call_output per Realtime API spec
-                    output: JSON.stringify({ error: "Failed to process the request" }),
-                  },
-                });
-                sendClientEvent({
-                  type: "response.create",
-                  response: {
-                    instructions: `
-                    Sorry, there was an error planning the changes. Please try again.
-                    `,
-                  },
-                });
-              });
+            // 2) Ask the model to produce a concise natural-language summary.
+            const summaryInstructions =
+              output.name === "plan_changes"
+                ? "Summarize the provided plan in one short sentence, listing the files that will be changed (paths relative to the project root)."
+                : "Summarize the code diff succinctly – what changed and in which files (paths relative to the project root).";
+
+            sendClientEvent({
+              type: "response.create",
+              response: {
+                instructions: summaryInstructions,
+              },
+            });
           } catch (error) {
             busyMap[output.name] = false;
-            console.error("Error parsing function call arguments:", error);
+            console.error("Error processing request:", error);
             setIsProcessing(false);
             sendClientEvent({
               type: "conversation.item.create",
@@ -209,14 +189,14 @@ export default function ToolPanel({
                 type: "function_call_output",
                 call_id: output.call_id || callId,
                 // 'name' is not required for function_call_output per Realtime API spec
-                output: JSON.stringify({ error: "Invalid arguments provided" }),
+                output: JSON.stringify({ error: "Failed to process the request" }),
               },
             });
             sendClientEvent({
               type: "response.create",
               response: {
                 instructions: `
-                Sorry, there was an error processing the function call. Please try again.
+                Sorry, there was an error planning the changes. Please try again.
                 `,
               },
             });

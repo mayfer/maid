@@ -5,6 +5,7 @@ import EventLog from "./EventLog";
 import SessionControls from "./SessionControls";
 import ToolPanel from "./ToolPanel";
 import GlobalStyle from "./GlobalStyles";
+import { clientTools } from "./ClientTools";
 
 const AppContainer = styled.div`
   height: 100%;
@@ -94,42 +95,7 @@ const RightSection = styled.section`
 const SESSION_UPDATE_EVENT = {
   type: "session.update",
   session: {
-    tools: [
-      {
-        type: "function",
-        name: "plan_changes",
-        description:
-          `Call this function when a user asks to plan changes to their codebase.\nYou will need a description of what changes they want to make. It may take a minute to get the plan.`,
-        parameters: {
-          type: "object",
-          strict: true,
-          properties: {
-            prompt: {
-              type: "string",
-              description: "Description of the changes to make.",
-            },
-          },
-          required: ["prompt"],
-        },
-      },
-      {
-        type: "function",
-        name: "apply_changes",
-        description:
-          `Call this function when a user asks to apply changes to their codebase.\nYou will need a description of what changes they want to make. It may take a few minutes to apply the changes. Only apply changes if user explicitly allows you to.`,
-        parameters: {
-          type: "object",
-          strict: true,
-          properties: {
-            prompt: {
-              type: "string",
-              description: "Description of the changes to make.",
-            },
-          },
-          required: ["prompt"],
-        },
-      },
-    ],
+    tools: clientTools,
     tool_choice: "auto",
   },
 };

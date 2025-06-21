@@ -1,8 +1,8 @@
-import { serve, sql } from "bun";
+import { serve } from "bun";
 import App from "./index.html";
 import mime from "mime-types";
 import { Command } from 'commander';
-import axios from 'axios';
+import { TerminalController } from '../controller2';
 
 const program = new Command();
 
@@ -17,6 +17,53 @@ const port = parseInt(options.port);
 const apiKey = process.env.OPENAI_API_KEY;
 const projectRoot = "/Users/murat/Code/recess";
 
+// Global terminal controller instance
+let terminalController: TerminalController | null = null;
+
+// Initialize terminal controller
+async function initializeTerminalController() {
+    if (terminalController) {
+        await terminalController.dispose();
+    }
+    
+    terminalController = new TerminalController({
+        sessionNamePrefix: 'maid-1',
+        idleTimeoutMs: 2000
+    });
+
+    terminalController.on('error', (error) => {
+        console.error('Terminal controller error:', error);
+    });
+
+    terminalController.on('ready', () => {
+        console.log('Terminal controller ready');
+    });
+
+    return new Promise<void>((resolve) => {
+        terminalController!.on('ready', () => {
+            resolve();
+        });
+    });
+}
+
+// Wait for terminal to be idle and return current state
+function waitForTerminalIdle(): Promise<string> {
+    return new Promise((resolve) => {
+        if (!terminalController) {
+            resolve('');
+            return;
+        }
+
+        const onIdle = async () => {
+            terminalController!.off('idle', onIdle);
+            const content = await terminalController!.getCurrentContent();
+            resolve(content);
+        };
+
+        terminalController.on('idle', onIdle);
+    });
+}
+
 // Utility function for JSON responses
 const jsonResponse = (data: any, status: number = 200) => {
     return new Response(JSON.stringify(data), {
@@ -25,50 +72,168 @@ const jsonResponse = (data: any, status: number = 200) => {
     });
 };
 
+// Initialize terminal controller on startup
+initializeTerminalController().catch(console.error);
+
+// Handle graceful shutdown
+process.on('SIGINT', async () => {
+    console.log('Shutting down...');
+    if (terminalController) {
+        await terminalController.dispose();
+    }
+    process.exit(0);
+});
+
 serve({
     port,
     routes: {
         // PUT SPECIFIC ROUTES FIRST - they need to be matched before wildcard routes
-        "/claudecode/plan": async (req: Request) => {
+        "/terminal/type": async (req: Request) => {
             if (req.method !== "POST") {
                 return new Response("Method not allowed", { status: 405 });
             }
 
+            if (!terminalController) {
+                return jsonResponse({ error: "Terminal controller not initialized" }, 500);
+            }
+
             try {
                 const body = await req.json();
-                const { prompt } = body;
+                const { text } = body;
                 
-                if (!prompt) {
-                    console.error("Plan received undefined prompt");
-                    return jsonResponse({ error: "No prompt provided" }, 400);
+                if (!text) {
+                    return jsonResponse({ error: "Missing 'text' parameter" }, 400);
                 }
 
-                return jsonResponse({ plan: "This is a placeholder plan for testing, tell the user the plan ID is 9234" });
+                // Send the text to terminal
+                await terminalController.sendKeys(text);
+                
+                // Wait for terminal to be idle and get the state
+                const terminalState = await waitForTerminalIdle();
+                
+                return jsonResponse({ 
+                    success: true, 
+                    terminalState 
+                });
             } catch (error) {
-                console.error("Plan error:", error);
-                return jsonResponse({ error: "Failed to process plan request" }, 500);
+                console.error("Terminal type error:", error);
+                return jsonResponse({ error: "Failed to send text to terminal" }, 500);
             }
         },
-        "/claudecode/apply": async (req: Request) => {
+        "/terminal/press_key": async (req: Request) => {
             if (req.method !== "POST") {
                 return new Response("Method not allowed", { status: 405 });
             }
 
+            if (!terminalController) {
+                return jsonResponse({ error: "Terminal controller not initialized" }, 500);
+            }
+
             try {
                 const body = await req.json();
-                console.log("Apply request body:", body);
-                const { prompt } = body;
-                console.log("apply User prompt:", prompt);
+                const { key } = body;
                 
-                if (!prompt) {
-                    console.error("Apply received undefined prompt");
-                    return jsonResponse({ error: "No prompt provided" }, 400);
+                if (!key) {
+                    return jsonResponse({ error: "Missing 'key' parameter" }, 400);
                 }
 
-                return jsonResponse({ changes: "Placeholder changes for testing" });
+                // Handle special keys
+                if (key === "Enter") {
+                    await terminalController.pressEnter();
+                } else {
+                    await terminalController.sendKeys(key);
+                }
+                
+                // Wait for terminal to be idle and get the state
+                const terminalState = await waitForTerminalIdle();
+                
+                return jsonResponse({ 
+                    success: true, 
+                    terminalState 
+                });
             } catch (error) {
-                console.error("Apply error:", error);
-                return jsonResponse({ error: "Failed to process apply request" }, 500);
+                console.error("Terminal key press error:", error);
+                return jsonResponse({ error: "Failed to send key to terminal" }, 500);
+            }
+        },
+        "/terminal/submitText": async (req: Request) => {
+            // This endpoint combines typing text and pressing Enter, useful for sending full commands.
+            if (req.method !== "POST") {
+                return new Response("Method not allowed", { status: 405 });
+            }
+
+            if (!terminalController) {
+                return jsonResponse({ error: "Terminal controller not initialized" }, 500);
+            }
+
+            try {
+                const body = await req.json();
+                const { text } = body;
+
+                if (!text) {
+                    return jsonResponse({ error: "Missing 'text' parameter" }, 400);
+                }
+
+                // Send the text and then press Enter.
+                await terminalController.sendKeys(text);
+                await terminalController.pressEnter();
+
+                // Wait for terminal to finish processing and capture its state.
+                const terminalState = await waitForTerminalIdle();
+
+                return jsonResponse({
+                    success: true,
+                    terminalState,
+                });
+            } catch (error) {
+                console.error("Terminal submitText error:", error);
+                return jsonResponse({ error: "Failed to submit text to terminal" }, 500);
+            }
+        },
+        "/terminal/command": async (req: Request) => {
+            if (req.method !== "POST") {
+                return new Response("Method not allowed", { status: 405 });
+            }
+
+            if (!terminalController) {
+                return jsonResponse({ error: "Terminal controller not initialized" }, 500);
+            }
+
+            try {
+                const body = await req.json();
+                const { command } = body;
+                
+                if (!command) {
+                    return jsonResponse({ error: "Missing 'command' parameter" }, 400);
+                }
+
+                // Send the command to terminal
+                await terminalController.sendCommand(command);
+                
+                // Wait for terminal to be idle and get the state
+                const terminalState = await waitForTerminalIdle();
+                
+                return jsonResponse({ 
+                    success: true, 
+                    terminalState 
+                });
+            } catch (error) {
+                console.error("Terminal command error:", error);
+                return jsonResponse({ error: "Failed to send command to terminal" }, 500);
+            }
+        },
+        "/terminal/get_terminal_state": async (req: Request) => {
+
+            if (!terminalController) {
+                return jsonResponse({ error: "Terminal controller not initialized" }, 500);
+            }
+
+            try {
+                const terminalState = await terminalController.getCurrentContent();
+                return jsonResponse({ terminalState });
+            } catch (error) {
+                console.error("Terminal state error:", error);
+                return jsonResponse({ error: "Failed to get terminal state" }, 500);
             }
         },
         "/token": async (req: Request) => {
@@ -77,22 +242,26 @@ serve({
             }
 
             try {
-                const response = await axios.post(
+                const response = await fetch(
                     "https://api.openai.com/v1/realtime/sessions",
                     {
-                        model: "gpt-4o-realtime-preview",
-                        voice: "alloy",
-                        // turn_detection: { silence_duration_ms: 2500 },
-                    },
-                    {
+                        method: "POST",
                         headers: {
                             Authorization: `Bearer ${apiKey}`,
                             "Content-Type": "application/json",
                         },
+                        body: JSON.stringify({
+                            model: "gpt-4o-realtime-preview",
+                            voice: "alloy",
+                            instructions: "You are a technical assistant, you speak concisely and to the point without filler words or niceties.",
+                            speed: 1.5
+                            // turn_detection: { silence_duration_ms: 2500 },
+                        })
                     }
                 );
 
-                return jsonResponse(response.data);
+                const data = await response.json();
+                return jsonResponse(data);
             } catch (error) {
                 console.error("Token generation error:", error);
                 return jsonResponse({ error: "Failed to generate token" }, 500);

@@ -42,7 +42,7 @@ export class TerminalController extends EventEmitter {
     constructor(private readonly options: TerminalControllerOptions = {}) {
         super();
         const prefix = options.sessionNamePrefix || 'terminal';
-        this.sessionName = `${prefix}-session-${Date.now()}`;
+        this.sessionName = `${prefix}`;
         this.idleTimeoutMs = options.idleTimeoutMs ?? 2000;
 
         // Fire-and-forget init sequence.

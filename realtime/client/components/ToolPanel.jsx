@@ -21,6 +21,7 @@ const OutputContainer = styled.div`
   display: flex;
   flex-direction: column;
   gap: 0.5rem;
+  position: relative;
 `;
 
 const OutputSection = styled.div`
@@ -35,33 +36,72 @@ const SectionTitle = styled.h2`
 
 const CodeBlock = styled.pre`
   font-size: 0.75rem;
-  background-color: #f3f4f6;
+  background-color: #000000;
+  color: #ffffff;
   border-radius: 0.375rem;
   padding: 0.5rem;
   width: 100%;
-  white-space: pre-wrap;
-  word-wrap: break-word;
+  white-space: pre;
+  overflow: auto;
   margin: 0;
+  font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+  position: relative;
+  
+  ${props => props.isLoading && `
+    &::before {
+      content: '';
+      position: absolute;
+      top: -2px;
+      left: -2px;
+      right: -2px;
+      bottom: -2px;
+      background: linear-gradient(45deg, #3b82f6, #8b5cf6, #06b6d4, #3b82f6);
+      background-size: 400% 400%;
+      border-radius: 0.5rem;
+      z-index: -1;
+      animation: glow 2s ease-in-out infinite alternate;
+    }
+    
+    @keyframes glow {
+      0% {
+        background-position: 0% 50%;
+        opacity: 0.8;
+      }
+      100% {
+        background-position: 100% 50%;
+        opacity: 1;
+      }
+    }
+  `}
+`;
+
+const LoadingText = styled.div`
+  color: #3b82f6;
+  font-size: 0.875rem;
+  font-weight: 500;
+  text-align: center;
+  padding: 0.5rem;
+  animation: pulse 1.5s ease-in-out infinite;
+  
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+  }
 `;
 
 const StatusText = styled.p`
   margin: 0;
 `;
 
-function FunctionCallOutput({ plan, changes }) {
+function TerminalOutput({ terminalState, isProcessing }) {
   return (
     <OutputContainer>
       <OutputSection>
-        {plan && (
+        {terminalState && (
           <>
-            <SectionTitle>Plan</SectionTitle>
-            <CodeBlock>{plan}</CodeBlock>
-          </>
-        )}
-        {changes && (
-          <>
-            <SectionTitle>Changes</SectionTitle>
-            <CodeBlock>{changes}</CodeBlock>
+            <SectionTitle>Terminal State</SectionTitle>
+            <CodeBlock isLoading={isProcessing}>{terminalState}</CodeBlock>
+            {isProcessing && <LoadingText>Loading...</LoadingText>}
           </>
         )}
       </OutputSection>
@@ -70,7 +110,6 @@ function FunctionCallOutput({ plan, changes }) {
 }
 
 let busyMap = {};
-// let processedCalls = {};
 
 export default function ToolPanel({
   isSessionActive,
@@ -78,8 +117,7 @@ export default function ToolPanel({
   sendTextMessage,
   events,
 }) {
-  const [plan, setPlan] = useState(null);
-  const [changes, setChanges] = useState(null);
+  const [terminalState, setTerminalState] = useState(null);
   const [isProcessing, setIsProcessing] = useState(false);
 
   useEffect(() => {
@@ -92,51 +130,38 @@ export default function ToolPanel({
     ) {
       mostRecentEvent.response.output.forEach(async (output) => {
         console.log("output", output);
-        if (output.type === "function_call" && (output.name === "plan_changes" || output.name === "apply_changes")) {
+        if (output.type === "function_call") {
           // Use call_id to track processed calls; if not available, fallback to a combination of name and timestamp
           const callId = output.call_id || `${output.name}-${Date.now()}`;
-          // if (processedCalls[callId]) return;
-          // processedCalls[callId] = true;
 
           if (busyMap[output.name]) return;
           busyMap[output.name] = true;
           // Indicate processing state locally without sending a new response to the model
-          // Sending a new `response.create` here interrupts the model's current audio stream,
-          // so instead we just update the local UI state.
           setIsProcessing(true);
           
           // Add debugging to see the structure
           console.log("Function call arguments:", output.arguments);
           
-          // Make HTTP call to the server using axios
+          // Make HTTP call to get terminal state
           try {
             // Parse arguments properly - it might be a string that needs parsing
-            let promptValue;
+            let argumentsValue;
             // Check if arguments is a string (JSON) or an object
             if (typeof output.arguments === 'string') {
-              const parsedArgs = JSON.parse(output.arguments);
-              promptValue = parsedArgs.prompt;
+              argumentsValue = JSON.parse(output.arguments);
             } else {
-              promptValue = output.arguments.prompt;
+              argumentsValue = output.arguments;
             }
             
-            // console.log("Extracted prompt value:", promptValue);
+            console.log("Extracted arguments:", argumentsValue);
             
-            if (!promptValue) {
-              console.error("Prompt value is undefined or empty");
-              throw new Error("Invalid prompt value");
+            if (!argumentsValue) {
+              console.error("Arguments value is undefined or empty");
+              throw new Error("Invalid arguments value");
             }
-
-            if(output.name === "apply_changes" && (plan || changes)) {
-              const prompt_prefix = JSON.stringify("The plan so far is as follows:\n"+plan+"\n\n"+changes);
-              promptValue = prompt_prefix + "\n\n" + promptValue;
-            }
-
-            const url = output.name === "plan_changes" ? "/claudecode/plan" : "/claudecode/apply";
+            const url = `/terminal/${output.name}`;
             
-            const response = await axios.post(url, {
-              prompt: promptValue
-            }, {
+            const response = await axios.post(url, argumentsValue, {
               headers: {
                 'Content-Type': 'application/json',
               },
@@ -145,12 +170,8 @@ export default function ToolPanel({
             const data = response.data;
             busyMap[output.name] = false;
             
-            // Update state with response
-            if(output.name === "plan_changes") {
-              setPlan(data.plan);
-            } else if(output.name === "apply_changes") {
-              setChanges(data.changes);
-            }
+            // Update state with terminal response - response is an object with terminalState property
+            setTerminalState(data.terminalState || JSON.stringify(data, null, 2));
             setIsProcessing(false);
             
             // Build the payload expected by the OpenAI Realtime docs for a function result.
@@ -159,24 +180,18 @@ export default function ToolPanel({
               item: {
                 type: "function_call_output",
                 call_id: output.call_id || callId,
-                // 'name' is not required for function_call_output per Realtime API spec
                 output: JSON.stringify(data),
               },
             };
 
-            // 1) Send the function_result back to the model so it can continue the conversation.
+            // Send the function_result back to the model so it can continue the conversation.
             sendClientEvent(functionResultEvent);
 
-            // 2) Ask the model to produce a concise natural-language summary.
-            const summaryInstructions =
-              output.name === "plan_changes"
-                ? "Summarize the provided plan in one short sentence, listing the files that will be changed (paths relative to the project root)."
-                : "Summarize the code diff succinctly – what changed and in which files (paths relative to the project root).";
-
+            // Ask the model to produce a response about the terminal state
             sendClientEvent({
               type: "response.create",
               response: {
-                instructions: summaryInstructions,
+                instructions: "Describe what happened in the terminal based on the function call result. Be concise and helpful.",
               },
             });
           } catch (error) {
@@ -188,22 +203,16 @@ export default function ToolPanel({
               item: {
                 type: "function_call_output",
                 call_id: output.call_id || callId,
-                // 'name' is not required for function_call_output per Realtime API spec
-                output: JSON.stringify({ error: "Failed to process the request" }),
+                output: JSON.stringify({ error: "Failed to process the terminal request" }),
               },
             });
             sendClientEvent({
               type: "response.create",
               response: {
-                instructions: `
-                Sorry, there was an error planning the changes. Please try again.
-                `,
+                instructions: "Sorry, there was an error with the terminal operation. Please try again.",
               },
             });
           }
-        }
-        
-        if (output.type === "function_call" && output.name === "apply_changes") {
         }
       });
     }
@@ -212,8 +221,6 @@ export default function ToolPanel({
   useEffect(() => {
     if (!isSessionActive) {
       setIsProcessing(false);
-      // Reset processed calls when session ends
-      // processedCalls = {};
     }
   }, [isSessionActive]);
 
@@ -221,15 +228,15 @@ export default function ToolPanel({
     <PanelContainer>
       <ContentContainer>
         {isSessionActive ? (
-          isProcessing ? (
-            <StatusText>Waiting for claude code...</StatusText>
-          ) : (plan || changes) ? (
-            <FunctionCallOutput plan={plan} changes={changes} />
+          terminalState ? (
+            <TerminalOutput terminalState={terminalState} isProcessing={isProcessing} />
+          ) : isProcessing ? (
+            <StatusText>Processing terminal command...</StatusText>
           ) : (
-            <StatusText>no plan or changes</StatusText>
+            <StatusText>No terminal activity yet</StatusText>
           )
         ) : (
-          <StatusText>Start the session to use this tool...</StatusText>
+          <StatusText>Start the session to use terminal tools...</StatusText>
         )}
       </ContentContainer>
     </PanelContainer>

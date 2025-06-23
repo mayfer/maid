@@ -171,6 +171,9 @@ export default function ToolPanel({
             // Ask the model to produce a response about the terminal state
             sendClientEvent({
               type: "response.create",
+              response: {
+                instructions: "Describe what happened in the terminal based on the function call result. Be concise and helpful.",
+              },
             });
           } catch (error) {
             busyMap[output.name] = false;
@@ -186,6 +189,9 @@ export default function ToolPanel({
             });
             sendClientEvent({
               type: "response.create",
+              response: {
+                instructions: "Sorry, there was an error with the terminal operation. Please try again.",
+              },
             });
           }
         }

@@ -47,7 +47,7 @@ const CodeBlock = styled.pre`
   font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
   position: relative;
   
-  ${props => props.isLoading && `
+  ${props => props.$isLoading && `
     &::before {
       content: '';
       position: absolute;
@@ -93,6 +93,21 @@ const StatusText = styled.p`
   margin: 0;
 `;
 
+const ConnectionStatus = styled.div`
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+  font-size: 0.875rem;
+`;
+
+const StatusIndicator = styled.div`
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background-color: ${props => props.$connected ? '#10b981' : '#ef4444'};
+`;
+
 function TerminalOutput({ terminalState, isProcessing }) {
   return (
     <OutputContainer>
@@ -100,7 +115,7 @@ function TerminalOutput({ terminalState, isProcessing }) {
         {terminalState && (
           <>
             <SectionTitle>Terminal State</SectionTitle>
-            <CodeBlock isLoading={isProcessing}>{terminalState}</CodeBlock>
+            <CodeBlock $isLoading={isProcessing}>{terminalState}</CodeBlock>
             {isProcessing && <LoadingText>Loading...</LoadingText>}
           </>
         )}
@@ -119,6 +134,7 @@ export default function ToolPanel({
 }) {
   const [terminalState, setTerminalState] = useState(null);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [wsConnected, setWsConnected] = useState(false);
 
   useEffect(() => {
     if (!events || events.length === 0) return;
@@ -224,9 +240,51 @@ export default function ToolPanel({
     }
   }, [isSessionActive]);
 
+  // WebSocket connection for real-time terminal updates
+  useEffect(() => {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${protocol}//${window.location.host}/ws`;
+    
+    const ws = new WebSocket(wsUrl);
+    
+    ws.onopen = () => {
+      console.log('WebSocket connected');
+      setWsConnected(true);
+    };
+    
+    ws.onmessage = (event) => {
+      try {
+        const message = JSON.parse(event.data);
+        if (message.type === 'terminal_state') {
+          setTerminalState(message.data);
+        }
+      } catch (error) {
+        console.error('Error parsing WebSocket message:', error);
+      }
+    };
+    
+    ws.onclose = () => {
+      console.log('WebSocket disconnected');
+      setWsConnected(false);
+    };
+    
+    ws.onerror = (error) => {
+      console.error('WebSocket error:', error);
+      setWsConnected(false);
+    };
+    
+    return () => {
+      ws.close();
+    };
+  }, []);
+
   return (
     <PanelContainer>
       <ContentContainer>
+        <ConnectionStatus>
+          <StatusIndicator $connected={wsConnected} />
+          <span>Terminal WebSocket: {wsConnected ? 'Connected' : 'Disconnected'}</span>
+        </ConnectionStatus>
         {isSessionActive ? (
           terminalState ? (
             <TerminalOutput terminalState={terminalState} isProcessing={isProcessing} />

@@ -38,6 +38,7 @@ export class TerminalController extends EventEmitter {
     private lastContent = '';
     private lastStateChange = Date.now();
     private monitoring = false;
+    private webSocketClients: Set<any> = new Set();
 
     constructor(private readonly options: TerminalControllerOptions = {}) {
         super();
@@ -101,10 +102,54 @@ export class TerminalController extends EventEmitter {
     }
 
     /**
+     * Force emit current terminal state (useful for WebSocket connections)
+     */
+    async emitCurrentState(): Promise<void> {
+        const content = await this.capturePane();
+        this.emit('output', content);
+    }
+
+    /**
+     * Add a WebSocket client to receive terminal updates
+     */
+    addWebSocketClient(ws: any): void {
+        this.webSocketClients.add(ws);
+    }
+
+    /**
+     * Remove a WebSocket client from terminal updates
+     */
+    removeWebSocketClient(ws: any): void {
+        this.webSocketClients.delete(ws);
+    }
+
+    /**
+     * Broadcast terminal state to all connected WebSocket clients
+     */
+    private broadcastToWebSockets(content: string): void {
+        const message = JSON.stringify({
+            type: 'terminal_state',
+            data: content
+        });
+
+        this.webSocketClients.forEach(ws => {
+            try {
+                ws.send(message);
+            } catch (error) {
+                console.error('Error sending WebSocket message:', error);
+                // Remove failed connection
+                this.webSocketClients.delete(ws);
+            }
+        });
+    }
+
+    /**
      * Gracefully dispose the controller and kill the underlying tmux session.
      */
     async dispose(): Promise<void> {
         this.monitoring = false;
+        // Close all WebSocket connections
+        this.webSocketClients.clear();
         try {
             await this.tmuxCommand(`kill-session -t ${this.sessionName}`);
         } catch (err) {
@@ -144,13 +189,14 @@ export class TerminalController extends EventEmitter {
             const content = await this.capturePane();
             if (content !== this.lastContent) {
                 this.emit('output', content);
+                this.broadcastToWebSockets(content); // Broadcast to WebSocket clients
                 this.lastContent = content;
                 this.lastStateChange = Date.now();
                 this.emitState('busy');
             } else if (Date.now() - this.lastStateChange >= this.idleTimeoutMs) {
                 this.emitState('idle');
             }
-            await this.sleep(100);
+            await this.sleep(50); // Reduced sleep time for more responsive updates
         }
     }
 

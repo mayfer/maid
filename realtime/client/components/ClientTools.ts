@@ -12,6 +12,10 @@ export const clientTools = [
             type: "string",
             description: "Text to type into the terminal.",
           },
+        },
+        required: ["text"],
+      },
+    },
   {
     type: "function",
     name: "submitText",
@@ -26,10 +30,7 @@ export const clientTools = [
         },
       },
       required: ["text"],
-    },
-  },
-        },
-        required: ["text"],
+
       },
     },
     {

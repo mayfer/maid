@@ -84,7 +84,7 @@ process.on('SIGINT', async () => {
     process.exit(0);
 });
 
-serve({
+const server = serve({
     port,
     routes: {
         // PUT SPECIFIC ROUTES FIRST - they need to be matched before wildcard routes
@@ -282,9 +282,44 @@ serve({
         "/": App,
     },
     // Fallback for any routes not matched above
-    fetch: (req: Request) => {
-        console.log("Fallback fetch handler called for:", req.url);
-        return new Response("Not Found", { status: 404 });
-    }
+    
+    fetch(req, server) {
+        if (new URL(req.url).pathname === "/ws" && server.upgrade(req)) return;
+        return new Response("Not found", { status: 404 });
+    },
+    websocket: {
+        message(ws, message) {
+            console.log('WebSocket message received:', message);
+        },
+        open(ws) {
+            console.log('WebSocket connection opened');
+            // Subscribe this connection to terminal updates
+            if (terminalController) {
+                terminalController.addWebSocketClient(ws);
+                // Send current terminal state to new connection
+                terminalController.getCurrentContent().then(content => {
+                    if (content) {
+                        ws.send(JSON.stringify({
+                            type: 'terminal_state',
+                            data: content
+                        }));
+                    }
+                }).catch(err => {
+                    console.error('Error sending initial terminal state:', err);
+                });
+            }
+        },
+        close(ws, code, message) {
+            console.log('WebSocket connection closed:', code, message);
+            // Unsubscribe this connection from terminal updates
+            if (terminalController) {
+                terminalController.removeWebSocketClient(ws);
+            }
+        },
+        drain(ws) {
+            // the socket is ready to receive more data
+        },
+    },
 });
+
 console.log("Listening on :" + port);

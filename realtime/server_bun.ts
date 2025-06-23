@@ -252,6 +252,7 @@ const server = serve({
                         },
                         body: JSON.stringify({
                             model: "gpt-4o-realtime-preview",
+                            modalities: ["text", "audio"],
                             voice: "alloy",
                             instructions: "You are a technical assistant, you speak concisely and to the point without filler words or niceties.",
                             speed: 1.5

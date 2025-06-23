@@ -87,6 +87,7 @@ const SessionControlsSection = styled.section`
 const SESSION_UPDATE_EVENT = {
   type: "session.update",
   session: {
+    modalities: ["text", "audio"],
     tools: clientTools,
     tool_choice: "auto",
   },
@@ -110,13 +111,14 @@ export default class App extends Component {
   }
 
   async startSession() {
-    // Get a session token for OpenAI Realtime API
-    const tokenResponse = await fetch("/token");
-    const data = await tokenResponse.json();
-    const EPHEMERAL_KEY = data.client_secret.value;
+    try {
+      // Get a session token for OpenAI Realtime API
+      const tokenResponse = await fetch("/token");
+      const data = await tokenResponse.json();
+      const EPHEMERAL_KEY = data.client_secret.value;
 
-    // Create a peer connection
-    const pc = new RTCPeerConnection();
+      // Create a peer connection
+      const pc = new RTCPeerConnection();
 
     // Set up to play remote audio from the model, routing to default or Bluetooth devices when possible
     const hiddenAudio = document.createElement("audio");
@@ -226,6 +228,10 @@ export default class App extends Component {
       navigator.mediaDevices?.addEventListener?.('devicechange', resumeCtx);
       document.addEventListener('visibilitychange', resumeCtx);
     }
+    } catch (error) {
+      console.error("Error starting session:", error);
+      this.setState({ isSessionActive: false });
+    }
   }
 
   // Stop current session, clean up peer connection and data channel
@@ -250,24 +256,38 @@ export default class App extends Component {
   }
 
   // Send a message to the model
-  sendClientEvent(message) {
-    const { dataChannel } = this.state;
-    if (dataChannel) {
-      const timestamp = new Date().toLocaleTimeString();
-      message.event_id = message.event_id || crypto.randomUUID();
+  sendClientEvent(message, bypassChecks = false) {
+    const { dataChannel, isSessionActive } = this.state;
+    
+    const canSend = bypassChecks ? 
+      (dataChannel && (dataChannel.readyState === 'open' || dataChannel.readyState === 'connecting')) :
+      (dataChannel && dataChannel.readyState === 'open' && isSessionActive);
+      
+    if (canSend) {
+      try {
+        const timestamp = new Date().toLocaleTimeString();
+        message.event_id = message.event_id || crypto.randomUUID();
 
-      // send event before setting timestamp since the backend peer doesn't expect this field
-      dataChannel.send(JSON.stringify(message));
+        // send event before setting timestamp since the backend peer doesn't expect this field
+        dataChannel.send(JSON.stringify(message));
 
-      // if guard just in case the timestamp exists by miracle
-      if (!message.timestamp) {
-        message.timestamp = timestamp;
+        // if guard just in case the timestamp exists by miracle
+        if (!message.timestamp) {
+          message.timestamp = timestamp;
+        }
+        this.setState((prevState) => ({ events: [message, ...prevState.events] }));
+      } catch (error) {
+        console.error("Error sending message:", error);
+        if (!bypassChecks) {
+          this.setState({ isSessionActive: false });
+        }
       }
-      this.setState((prevState) => ({ events: [message, ...prevState.events] }));
     } else {
       console.error(
-        "Failed to send message - no data channel available",
+        "Failed to send message - data channel not available or not open",
         message,
+        "dataChannel:", dataChannel?.readyState,
+        "isSessionActive:", isSessionActive
       );
     }
   }
@@ -278,7 +298,7 @@ export default class App extends Component {
       type: "conversation.item.create",
       item: {
         type: "message",
-        role: "assistant",
+        role: "user",
         content: [
           {
             type: "input_text",
@@ -296,16 +316,28 @@ export default class App extends Component {
     const { dataChannel } = this.state;
     if (dataChannel && dataChannel !== prevState.dataChannel) {
       dataChannel.addEventListener("message", (e) => {
-        const event = JSON.parse(e.data);
-        if (!event.timestamp) {
-          event.timestamp = new Date().toLocaleTimeString();
+        try {
+          const event = JSON.parse(e.data);
+          if (!event.timestamp) {
+            event.timestamp = new Date().toLocaleTimeString();
+          }
+          this.setState((prevState) => ({ events: [event, ...prevState.events] }));
+        } catch (error) {
+          console.error("Error parsing message:", error);
         }
-        this.setState((prevState) => ({ events: [event, ...prevState.events] }));
       });
       dataChannel.addEventListener("open", () => {
         this.setState({ isSessionActive: true, events: [] });
         // As soon as the channel is ready, register our tools with the model.
-        this.sendClientEvent(SESSION_UPDATE_EVENT);
+        this.sendClientEvent(SESSION_UPDATE_EVENT, true);
+      });
+      dataChannel.addEventListener("close", () => {
+        console.log("Data channel closed");
+        this.setState({ isSessionActive: false });
+      });
+      dataChannel.addEventListener("error", (error) => {
+        console.error("Data channel error:", error);
+        this.setState({ isSessionActive: false });
       });
     }
   }

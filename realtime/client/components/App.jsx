@@ -102,6 +102,7 @@ export default class App extends Component {
     };
     this.peerConnection = React.createRef();
     this.audioElement = React.createRef();
+    this.audioContext = null; // iOS-only Web Audio pipeline
     this.startSession = this.startSession.bind(this);
     this.stopSession = this.stopSession.bind(this);
     this.sendClientEvent = this.sendClientEvent.bind(this);
@@ -155,7 +156,7 @@ export default class App extends Component {
 
         if (isIOS && AudioCtx) {
           try {
-            const ctx = new AudioCtx();
+            const ctx = this.audioContext || (this.audioContext = new AudioCtx());
             if (ctx.state === 'suspended') {
               ctx.resume().catch(() => {/* ignore */});
             }
@@ -212,6 +213,19 @@ export default class App extends Component {
     await pc.setRemoteDescription(answer);
 
     this.peerConnection.current = pc;
+
+    // On iOS Safari the audio route can flip when the OS detects a new BT device.
+    // If that happens, resuming the AudioContext immediately usually puts audio
+    // back on the selected route.
+    if (/iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream) {
+      const resumeCtx = () => {
+        if (this.audioContext && this.audioContext.state === 'suspended') {
+          this.audioContext.resume().catch(() => {/* ignore */});
+        }
+      };
+      navigator.mediaDevices?.addEventListener?.('devicechange', resumeCtx);
+      document.addEventListener('visibilitychange', resumeCtx);
+    }
   }
 
   // Stop current session, clean up peer connection and data channel

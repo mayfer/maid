@@ -3,7 +3,6 @@ import styled from 'styled-components';
 import axios from 'axios';
 
 const PanelContainer = styled.section`
-  height: 100%;
   width: 100%;
   display: flex;
   flex-direction: column;
@@ -11,7 +10,6 @@ const PanelContainer = styled.section`
 `;
 
 const ContentContainer = styled.div`
-  height: 100%;
   background-color: #f9fafb;
   border-radius: 0.375rem;
   padding: 1rem;
@@ -46,47 +44,15 @@ const CodeBlock = styled.pre`
   margin: 0;
   font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
   position: relative;
-  
+
+  /* Flash the background when loading */
   ${props => props.$isLoading && `
-    &::before {
-      content: '';
-      position: absolute;
-      top: -2px;
-      left: -2px;
-      right: -2px;
-      bottom: -2px;
-      background: linear-gradient(45deg, #3b82f6, #8b5cf6, #06b6d4, #3b82f6);
-      background-size: 400% 400%;
-      border-radius: 0.5rem;
-      z-index: -1;
-      animation: glow 2s ease-in-out infinite alternate;
-    }
-    
-    @keyframes glow {
-      0% {
-        background-position: 0% 50%;
-        opacity: 0.8;
-      }
-      100% {
-        background-position: 100% 50%;
-        opacity: 1;
-      }
+    animation: flash-bg 1s step-start infinite;
+    @keyframes flash-bg {
+      0%, 100% { background-color: #000000; }
+      50% { background-color: #013220; }
     }
   `}
-`;
-
-const LoadingText = styled.div`
-  color: #3b82f6;
-  font-size: 0.875rem;
-  font-weight: 500;
-  text-align: center;
-  padding: 0.5rem;
-  animation: pulse 1.5s ease-in-out infinite;
-  
-  @keyframes pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.5; }
-  }
 `;
 
 const StatusText = styled.p`
@@ -116,7 +82,6 @@ function TerminalOutput({ terminalState, isProcessing }) {
           <>
             <SectionTitle>Terminal State</SectionTitle>
             <CodeBlock $isLoading={isProcessing}>{terminalState}</CodeBlock>
-            {isProcessing && <LoadingText>Loading...</LoadingText>}
           </>
         )}
       </OutputSection>

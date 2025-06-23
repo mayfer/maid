@@ -43,52 +43,44 @@ const Title = styled.h1`
   font-weight: normal;
 `;
 
+/*
+ * High-level layout
+ * ┌──────────────────────────────┐
+ * │            Nav              │
+ * ├──────────────────────────────┤
+ * │          Terminal            │  <- grows with its content
+ * ├──────────────────────────────┤
+ * │         Event Log            │  <- fills remaining space
+ * ├──────────────────────────────┤
+ * │      Session Controls        │  <- fixed height
+ * └──────────────────────────────┘
+ */
+
 const Main = styled.main`
   position: absolute;
   top: 4rem;
   left: 0;
   right: 0;
   bottom: 0;
-`;
-
-const LeftSection = styled.section`
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 50%;
-  bottom: 0;
   display: flex;
   flex-direction: column;
 `;
 
+const TerminalSection = styled.section`
+  padding: 1rem;
+  padding-top: 0;
+  flex: 0 0 auto; /* let height be dictated by its content */
+`;
+
 const EventLogSection = styled.section`
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 8rem;
+  flex: 1 1 auto; /* take the remaining vertical space */
   padding: 0 1rem;
   overflow-y: auto;
 `;
 
 const SessionControlsSection = styled.section`
-  position: absolute;
-  height: 8rem;
-  left: 0;
-  right: 0;
-  bottom: 0;
+  flex: 0 0 8rem;
   padding: 1rem;
-`;
-
-const RightSection = styled.section`
-  position: absolute;
-  top: 0;
-  width: 50%;
-  right: 0;
-  bottom: 0;
-  padding: 1rem;
-  padding-top: 0;
-  overflow-y: auto;
 `;
 
 // Define the session.update payload that registers the function tools with the model.
@@ -125,10 +117,68 @@ export default class App extends Component {
     // Create a peer connection
     const pc = new RTCPeerConnection();
 
-    // Set up to play remote audio from the model
-    this.audioElement.current = document.createElement("audio");
-    this.audioElement.current.autoplay = true;
-    pc.ontrack = (e) => (this.audioElement.current.srcObject = e.streams[0]);
+    // Set up to play remote audio from the model, routing to default or Bluetooth devices when possible
+    const hiddenAudio = document.createElement("audio");
+    hiddenAudio.autoplay = true;
+    // playsInline avoids iOS fullscreen video UI and enables background/Bluetooth routing.
+    hiddenAudio.playsInline = true;
+    hiddenAudio.style.display = 'none';
+    // Keep element in the DOM so Safari doesn't garbage-collect the MediaStream sink.
+    document.body.appendChild(hiddenAudio);
+    this.audioElement.current = hiddenAudio;
+    pc.ontrack = (e) => {
+      const stream = e.streams[0];
+      const audioEl = this.audioElement.current;
+      // If browser supports selecting output device, route to the OS default
+      if (typeof audioEl.setSinkId === 'function') {
+        audioEl.srcObject = stream;
+        // Kick-off playback; some browsers need an explicit invocation even with autoplay.
+        const playPromise = audioEl.play();
+        if (playPromise?.catch) {
+          playPromise.catch(() => {/* user gesture may be required elsewhere */});
+        }
+        navigator.mediaDevices.enumerateDevices()
+          .then(devices => {
+            const def = devices.find(d => d.kind === 'audiooutput' && d.deviceId === 'default');
+            if (def) {
+              audioEl.setSinkId(def.deviceId)
+                .catch(err => console.warn('setSinkId error:', err));
+            }
+          })
+          .catch(err => console.warn('enumerateDevices error:', err));
+      // Fallback on browsers that do *not* support setSinkId (e.g. iOS Safari).
+      // Using a plain <audio> element lets the OS keep the current route (Bluetooth / AirPlay / built-in)
+      // whereas routing through the Web Audio API forces output to the speaker on iOS.
+      } else {
+        const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+
+        if (isIOS && AudioCtx) {
+          try {
+            const ctx = new AudioCtx();
+            if (ctx.state === 'suspended') {
+              ctx.resume().catch(() => {/* ignore */});
+            }
+            const src = ctx.createMediaStreamSource(stream);
+            src.connect(ctx.destination);
+          } catch (err) {
+            console.warn('Web-Audio fallback failed, reverting to media element:', err);
+            audioEl.srcObject = stream;
+            const p = audioEl.play();
+            if (p?.catch) {
+              p.catch(() => {/* ignored */});
+            }
+          }
+        } else {
+          audioEl.srcObject = stream;
+          // Ensure playback starts – required on some browsers once mic is active.
+          const p = audioEl.play();
+          if (p?.catch) {
+            p.catch(() => {/* ignored */});
+          }
+        }
+      }
+    };
 
     // Add local audio track for microphone input in the browser
     const ms = await navigator.mediaDevices.getUserMedia({
@@ -258,29 +308,27 @@ export default class App extends Component {
             </NavContent>
           </Nav>
           <Main>
-            <LeftSection>
-              <EventLogSection>
-                <EventLog events={events} />
-              </EventLogSection>
-              <SessionControlsSection>
-                <SessionControls
-                  startSession={this.startSession}
-                  stopSession={this.stopSession}
-                  sendClientEvent={this.sendClientEvent}
-                  sendTextMessage={this.sendTextMessage}
-                  events={events}
-                  isSessionActive={isSessionActive}
-                />
-              </SessionControlsSection>
-            </LeftSection>
-            <RightSection>
+            <TerminalSection>
               <ToolPanel
                 sendClientEvent={this.sendClientEvent}
                 sendTextMessage={this.sendTextMessage}
                 events={events}
                 isSessionActive={isSessionActive}
               />
-            </RightSection>
+            </TerminalSection>
+            <EventLogSection>
+              <EventLog events={events} />
+            </EventLogSection>
+            <SessionControlsSection>
+              <SessionControls
+                startSession={this.startSession}
+                stopSession={this.stopSession}
+                sendClientEvent={this.sendClientEvent}
+                sendTextMessage={this.sendTextMessage}
+                events={events}
+                isSessionActive={isSessionActive}
+              />
+            </SessionControlsSection>
           </Main>
         </AppContainer>
       </>

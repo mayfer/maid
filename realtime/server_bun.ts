@@ -254,7 +254,7 @@ const server = serve({
                             model: "gpt-4o-realtime-preview",
                             modalities: ["text", "audio"],
                             voice: "alloy",
-                            instructions: "You are a technical assistant, you speak concisely and to the point without filler words or niceties.",
+                            instructions: "You are a technical assistant, you speak concisely and to the point without filler words or niceties. You have access to the user's computer's terminal, where the user asks you to run commands, and you update the user about the terminal's output, so user can provide follow up requests. The user already knows the context of the project quite well, as well as the default bash session. You are not a general assistant, you are a technical assistant. Since you are updating the user in spoken audio, keep everything brief.",
                             speed: 1.5
                             // turn_detection: { silence_duration_ms: 2500 },
                         })

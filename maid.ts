@@ -4,6 +4,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
 import { homedir } from "os";
 import { spawn } from "child_process";
 import path from "path";
+import { buildPrompt, DEFAULT_CHAT_SYSTEM_PROMPT } from "./prompt";
 
 const LEGACY_CACHE_FILE = "/tmp/muchat_last_model.txt";
 const LEGACY_CACHE_SELECTION_FILE = "/tmp/muchat_last_model_selection.json";
@@ -20,8 +21,6 @@ const ASSISTANT_DOT = `${PRIMARY_TEXT}●${RESET_TEXT} `;
 const ASSISTANT_TYPING = "\x1B[2m…\x1B[0m";
 const DIM_TEXT = "\x1B[2m";
 const RUN_COMMAND_MARKER = "__RUN_COMMAND__";
-const DEFAULT_CHAT_SYSTEM_PROMPT = "You are a terminal assistant for quick, concise answers. Provide only what the user asked for. No extra context, no markdown, plain text only. If and only if the entire answer is exactly one executable shell command, output exactly two lines: line 1 is only the command; line 2 is only __RUN_COMMAND__. Never place __RUN_COMMAND__ anywhere else."
-
 interface ModelSelection {
     modelId: string;
     provider: "openrouter" | "openai";
@@ -188,7 +187,7 @@ function endpointPromptDefaultFromApiBase(baseUrl: string): string {
 }
 
 function getDefaultSystemPrompt(): string {
-    return DEFAULT_CHAT_SYSTEM_PROMPT;
+    return buildPrompt(DEFAULT_CHAT_SYSTEM_PROMPT);
 }
 
 function stripRunMarker(response: string): { content: string; hasMarker: boolean } {
@@ -247,7 +246,6 @@ async function maybePromptToRunCommand(command: string): Promise<boolean> {
     if (!process.stdin.isTTY || !process.stdout.isTTY) return false;
     const answer = (await promptForLine(`${DIM_TEXT}Run command? ${RESET_TEXT}${PRIMARY_TEXT}y/n${RESET_TEXT} `))?.trim().toLowerCase();
     if (answer === "y") {
-        console.log(`${DIM_TEXT}$${RESET_TEXT} ${command}`);
         await runCommand(command);
         return true;
     }
@@ -1054,7 +1052,7 @@ async function chat(args: string[]) {
 
     // Add system prompt if provided
     if (systemPrompt) {
-        messages.push({ role: "system", content: systemPrompt });
+        messages.push({ role: "system", content: buildPrompt(systemPrompt) });
     }
 
     // Interactive loop for messages
@@ -1227,6 +1225,11 @@ async function streamChatResponse(
                 apiKey,
                 modelId,
                 messages,
+                webSearch,
+                onToolCall: (toolName, args) => {
+                    const query = typeof args?.query === "string" ? args.query : "";
+                    process.stdout.write(`\n${DIM_TEXT}[tool] ${toolName}${query ? `: ${query}` : ""}${RESET_TEXT}\n`);
+                },
                 onDelta: onAnswerDelta,
                 signal: streamAbortController.signal,
             });
@@ -1257,7 +1260,6 @@ async function streamChatResponse(
         }
 
         removeTypingEllipsis();
-
         const { content: cleanedResponse, hasMarker } = stripRunMarker(fullResponse);
         const remaining = cleanedResponse.slice(renderedAnswerChars);
         if (remaining.length > 0) {
@@ -1272,8 +1274,9 @@ async function streamChatResponse(
         
         // Add assistant response to history
         if (fullResponse.length > 0) messages.push({ role: "assistant", content: fullResponse });
-        
-        console.log("\n");
+
+        // Keep spacing tight before command confirmation prompts.
+        process.stdout.write(commandToRun ? "\n" : "\n\n");
     } catch (error) {
         removeTypingEllipsis();
         if (startedAssistantLine) process.stdout.write("\n");
@@ -1314,12 +1317,18 @@ async function streamCustomOpenAICompatibleResponse(opts: {
     apiKey?: string;
     modelId: string;
     messages: { role: "system" | "user" | "assistant"; content: string }[];
+    webSearch?: boolean;
     onDelta?: (delta: string) => void;
+    onToolCall?: (toolName: string, args: Record<string, any>) => void;
     signal?: AbortSignal;
 }): Promise<string> {
+    type ToolCapableMessage =
+        | { role: "system" | "user" | "assistant"; content: string; tool_calls?: any[] }
+        | { role: "tool"; tool_call_id: string; name: string; content: string };
+
     const { baseUrl, apiKey, modelId, messages } = opts;
-    const requestMessages = messages.some((m) => m.role === "system")
-        ? messages
+    const requestMessages: ToolCapableMessage[] = messages.some((m) => m.role === "system")
+        ? [...messages]
         : [{ role: "system", content: DEFAULT_CHAT_SYSTEM_PROMPT } as const, ...messages];
     const systemPrompt = requestMessages.find((m) => m.role === "system")?.content;
     if (process.env.MAID_DEBUG_SYSTEM_PROMPT === "1") {
@@ -1330,6 +1339,135 @@ async function streamCustomOpenAICompatibleResponse(opts: {
         Accept: "application/json",
     };
     if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+
+    const webSearchTool = {
+        type: "function",
+        function: {
+            name: "web_search",
+            description: "Search the web for up-to-date information and return concise source snippets.",
+            parameters: {
+                type: "object",
+                properties: {
+                    query: { type: "string", description: "Search query string." },
+                    top_k: { type: "number", description: "Maximum number of results to return.", default: 5 },
+                },
+                required: ["query"],
+            },
+        },
+    };
+
+    const fetchSearchResults = async (query: string, topK: number): Promise<string> => {
+        const url = new URL("https://api.duckduckgo.com/");
+        url.searchParams.set("q", query);
+        url.searchParams.set("format", "json");
+        url.searchParams.set("no_html", "1");
+        url.searchParams.set("no_redirect", "1");
+        url.searchParams.set("skip_disambig", "1");
+        const searchResp = await fetch(url.toString(), { signal: opts.signal });
+        if (!searchResp.ok) {
+            return JSON.stringify({ query, error: `search_failed:${searchResp.status}` });
+        }
+        const payload: any = await searchResp.json();
+        const related = Array.isArray(payload?.RelatedTopics) ? payload.RelatedTopics : [];
+        const flattened = related.flatMap((item: any) =>
+            Array.isArray(item?.Topics) ? item.Topics : [item],
+        );
+        const items = flattened
+            .filter((item: any) => typeof item?.Text === "string")
+            .slice(0, Math.max(1, Math.min(topK || 5, 8)))
+            .map((item: any) => ({
+                title: item.Text.split(" - ")[0] || item.Text,
+                snippet: item.Text,
+                url: item.FirstURL,
+            }));
+        const abstract = typeof payload?.AbstractText === "string" && payload.AbstractText.trim().length > 0
+            ? [{
+                title: payload.Heading || query,
+                snippet: payload.AbstractText,
+                url: payload.AbstractURL || undefined,
+            }]
+            : [];
+        return JSON.stringify({
+            query,
+            results: [...abstract, ...items].slice(0, Math.max(1, Math.min(topK || 5, 8))),
+            source: "duckduckgo_instant_answer",
+        });
+    };
+
+    const doChatCompletion = async (
+        requestBody: Record<string, any>,
+    ): Promise<any> => {
+        const response = await fetch(`${baseUrl}/chat/completions`, {
+            method: "POST",
+            headers,
+            signal: opts.signal,
+            body: JSON.stringify(requestBody),
+        });
+
+        if (!response.ok) {
+            const body = await response.text().catch(() => "");
+            throw new Error(`${response.status} ${response.statusText}${body ? `: ${body}` : ""}`);
+        }
+        return response.json();
+    };
+
+    // Tool-calling loop for OpenAI-compatible endpoints (e.g. LM Studio).
+    if (opts.webSearch) {
+        const toolMaxRounds = 3;
+        for (let round = 0; round < toolMaxRounds; round++) {
+            const payload: any = await doChatCompletion({
+                model: modelId,
+                messages: requestMessages,
+                ...(systemPrompt ? { system_prompt: systemPrompt } : {}),
+                tools: [webSearchTool],
+                tool_choice: "auto",
+                stream: false,
+            });
+            const message = payload?.choices?.[0]?.message || {};
+            const toolCalls: any[] = Array.isArray(message?.tool_calls) ? message.tool_calls : [];
+            if (toolCalls.length === 0) {
+                const finalContent = typeof message?.content === "string"
+                    ? message.content
+                    : typeof payload?.output_text === "string"
+                        ? payload.output_text
+                        : JSON.stringify(payload);
+                if (finalContent.length > 0) opts.onDelta?.(finalContent);
+                return finalContent;
+            }
+
+            requestMessages.push({
+                role: "assistant",
+                content: typeof message?.content === "string" ? message.content : "",
+                tool_calls: toolCalls,
+            });
+
+            for (const call of toolCalls) {
+                const name = call?.function?.name;
+                const rawArgs = call?.function?.arguments;
+                if (name !== "web_search") continue;
+                let parsedArgs: Record<string, any> = {};
+                try {
+                    parsedArgs = typeof rawArgs === "string" ? JSON.parse(rawArgs) : {};
+                } catch {
+                    parsedArgs = {};
+                }
+                const query = typeof parsedArgs?.query === "string" ? parsedArgs.query.trim() : "";
+                const topK = Number.isFinite(Number(parsedArgs?.top_k)) ? Number(parsedArgs.top_k) : 5;
+                opts.onToolCall?.("web_search", { query, top_k: topK });
+                const result = query
+                    ? await fetchSearchResults(query, topK)
+                    : JSON.stringify({ error: "missing_query" });
+
+                requestMessages.push({
+                    role: "tool",
+                    tool_call_id: call?.id || `tool_${Date.now()}`,
+                    name: "web_search",
+                    content: result,
+                });
+            }
+        }
+        return "I could not complete web search tool calls after multiple attempts.";
+    }
 
     const response = await fetch(`${baseUrl}/chat/completions`, {
         method: "POST",

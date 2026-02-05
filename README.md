@@ -33,31 +33,26 @@ From repo root:
 ```bash
 bun install
 bun maid.ts --help
-bun maid.ts "explain this repo"
-bun maid.ts --model openai/gpt-5-mini "write a short changelog"
 ```
 
 If no `--model` is passed, maid uses cached selection or prompts you.
 
 ## Compile binary
 
-```bash
-bun scripts/build.ts
+```command
+$ bun scripts/build.ts
+Builds stand-alone executable in dist/maid
 ```
 
-Output:
-
-- `dist/maid`
-
-## Install binary to ~/.local/bin/maid
+## Compile & Install binary to ~/.local/bin/maid
 
 ```bash
 ./scripts/install.sh
 ```
 
-Then run:
+## Additional features
 
-```bash
-maid --help
-maid "hello"
-```
+* You can type `-m` anytime in chat mode to change model
+* Settings go in ~/.config/maid.json
+* Popular & newest OpenRouter models (or local models) are easily selectable
+* It will ask for OpenRouter API key if OPENROUTER_API_KEY env var is not set

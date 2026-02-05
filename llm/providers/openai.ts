@@ -41,6 +41,7 @@ export async function fetchModels(
 export async function reasoningStream(opts: ReasoningStreamOptions) {
   const {
     prompt,
+    messages: inputMessages,
     model,
     effort = ReasoningEffort.Medium,
     printHeaders = true,
@@ -96,8 +97,15 @@ export async function reasoningStream(opts: ReasoningStreamOptions) {
     else process.stdout.write(delta);
   }
 
-  const body: any = { model, input: prompt, stream: true };
+  const input =
+    inputMessages && inputMessages.length > 0
+      ? inputMessages
+      : prompt;
+  const body: any = { model, input, stream: true };
   body.reasoning = { effort, summary: "detailed" };
+  if (opts.webSearch) {
+    body.tools = [{ type: "web_search" }];
+  }
 
   const stream = await client.responses.create(body);
   for await (const event of stream as any) {

@@ -2,3 +2,4 @@ node_modules/
 package-lock.json
 bun.lock
 dist/
+AGENTS.md

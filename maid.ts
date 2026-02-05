@@ -2,6 +2,7 @@ import { fetchModelsWithRanking, reasoningStream, getTopModels } from "./llm/ind
 import type { StandardizedModel, ChatMessage } from "./llm/index";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
 import { homedir } from "os";
+import { spawn } from "child_process";
 import path from "path";
 
 const LEGACY_CACHE_FILE = "/tmp/muchat_last_model.txt";
@@ -18,7 +19,8 @@ const RESET_TEXT = "\x1B[0m";
 const ASSISTANT_DOT = `${PRIMARY_TEXT}●${RESET_TEXT} `;
 const ASSISTANT_TYPING = "\x1B[2m…\x1B[0m";
 const DIM_TEXT = "\x1B[2m";
-const DEFAULT_CHAT_SYSTEM_PROMPT = "You are terminal assistant for quick concise answers. Provide only the answer user asked for. Do not provide additional context or instructions for anything the user did not ask for. Keep it simple and robotically unexpressivae. Avoid using markdown. Respond in raw text."
+const RUN_COMMAND_MARKER = "__RUN_COMMAND__";
+const DEFAULT_CHAT_SYSTEM_PROMPT = "You are a terminal assistant for quick, concise answers. Provide only what the user asked for. No extra context, no markdown, plain text only. If and only if the entire answer is exactly one executable shell command, output exactly two lines: line 1 is only the command; line 2 is only __RUN_COMMAND__. Never place __RUN_COMMAND__ anywhere else."
 
 interface ModelSelection {
     modelId: string;
@@ -189,6 +191,69 @@ function getDefaultSystemPrompt(): string {
     return DEFAULT_CHAT_SYSTEM_PROMPT;
 }
 
+function stripRunMarker(response: string): { content: string; hasMarker: boolean } {
+    const normalized = response.replace(/\r\n/g, "\n");
+    const lines = normalized.split("\n");
+    while (lines.length > 0 && lines[lines.length - 1].trim() === "") {
+        lines.pop();
+    }
+    if (lines.length < 2) return { content: response, hasMarker: false };
+    if (lines[lines.length - 1].trim() !== RUN_COMMAND_MARKER) {
+        return { content: response, hasMarker: false };
+    }
+    const content = lines.slice(0, -1).join("\n").replace(/\s+$/, "");
+    return { content, hasMarker: true };
+}
+
+function isSingleCommandResponse(response: string): boolean {
+    const trimmed = response.trim();
+    if (!trimmed) return false;
+    if (trimmed.includes("\n")) return false;
+    if (trimmed.startsWith("```") || trimmed.endsWith("```")) return false;
+    return true;
+}
+
+async function runCommand(command: string): Promise<void> {
+    await new Promise<void>((resolve) => {
+        const child = spawn(command, { shell: true, stdio: ["inherit", "pipe", "pipe"] });
+        let sawOutput = false;
+        let lastOutputEndedWithNewline = true;
+
+        const handleChunk = (chunk: Buffer | string, writer: (s: string) => void) => {
+            const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
+            if (!text) return;
+            sawOutput = true;
+            lastOutputEndedWithNewline = text.endsWith("\n");
+            writer(text);
+        };
+
+        child.stdout?.on("data", (chunk) => handleChunk(chunk, (s) => process.stdout.write(s)));
+        child.stderr?.on("data", (chunk) => handleChunk(chunk, (s) => process.stderr.write(s)));
+
+        child.on("error", (error) => {
+            console.error(`Failed to run command: ${error.message}`);
+            resolve();
+        });
+        child.on("exit", () => {
+            if (process.stdout.isTTY && sawOutput && !lastOutputEndedWithNewline) {
+                process.stdout.write("\n");
+            }
+            resolve();
+        });
+    });
+}
+
+async function maybePromptToRunCommand(command: string): Promise<boolean> {
+    if (!process.stdin.isTTY || !process.stdout.isTTY) return false;
+    const answer = (await promptForLine(`${DIM_TEXT}Run command? ${RESET_TEXT}${PRIMARY_TEXT}y/n${RESET_TEXT} `))?.trim().toLowerCase();
+    if (answer === "y") {
+        console.log(`${DIM_TEXT}$${RESET_TEXT} ${command}`);
+        await runCommand(command);
+        return true;
+    }
+    return false;
+}
+
 async function ensureOpenRouterApiKeyConfigured(): Promise<void> {
     const envApiKey = process.env.OPENROUTER_API_KEY?.trim();
     if (envApiKey) return;
@@ -217,7 +282,6 @@ async function ensureOpenRouterApiKeyConfigured(): Promise<void> {
 
 async function main() {
     ensureConfigDir();
-    await ensureOpenRouterApiKeyConfigured();
 
     const args = process.argv.slice(2);
     const firstArg = args[0];
@@ -227,9 +291,15 @@ async function main() {
         return;
     }
 
+    if (args.length === 1 && (firstArg === "--system" || firstArg === "-s")) {
+        console.log(getDefaultSystemPrompt());
+        return;
+    }
+
     // No subcommands; default to chat behavior.
     if (!firstArg) {
         if (process.stdin.isTTY && process.stdout.isTTY) {
+            await ensureOpenRouterApiKeyConfigured();
             await chat([]);
         } else {
             printHelp();
@@ -237,6 +307,7 @@ async function main() {
         return;
     }
 
+    await ensureOpenRouterApiKeyConfigured();
     await chat(args);
 }
 
@@ -825,12 +896,13 @@ async function chat(args: string[]) {
         arg.startsWith("--system=") ||
         arg.startsWith("-s=")
     );
+    let systemValue: string | undefined;
     if (systemIdx !== -1) {
         const systemArg = args[systemIdx];
         const eqIdx = systemArg.indexOf("=");
         const inlineValue = eqIdx !== -1 && eqIdx < systemArg.length - 1 ? systemArg.slice(eqIdx + 1) : undefined;
         const nextArg = args[systemIdx + 1];
-        const systemValue = inlineValue || (nextArg && !nextArg.startsWith("-") ? nextArg : undefined);
+        systemValue = inlineValue || (nextArg && !nextArg.startsWith("-") ? nextArg : undefined);
         if (systemValue) {
             // Check if it's a file path
             if (existsSync(systemValue)) {
@@ -867,6 +939,11 @@ async function chat(args: string[]) {
         nonOptionArgs.push(args[i]);
     }
     let initialPrompt = nonOptionArgs.length > 0 ? nonOptionArgs.join(" ") : undefined;
+
+    if (systemIdx !== -1 && !systemValue && !initialPrompt) {
+        console.log(systemPrompt);
+        return;
+    }
 
     if (!systemPrompt) {
         systemPrompt = getDefaultSystemPrompt();
@@ -1074,6 +1151,9 @@ async function streamChatResponse(
     let sawReasoning = false;
     let startedAnswer = false;
     let userStopped = false;
+    let pendingAnswerTail = "";
+    let renderedAnswerChars = 0;
+    let commandToRun: string | undefined;
     const streamAbortController = new AbortController();
     const stdin = process.stdin;
     const canListenForStop = Boolean(process.stdin.isTTY && process.stdout.isTTY);
@@ -1118,56 +1198,77 @@ async function streamChatResponse(
         startedAssistantLine = true;
         showTypingEllipsis();
 
-        if (baseUrl) {
+        const onAnswerDelta = (delta: string) => {
+            if (userStopped) return;
             removeTypingEllipsis();
+            if (!startedAnswer) {
+                if (sawReasoning) {
+                    process.stdout.write("\n\n");
+                }
+                startedAnswer = true;
+            }
+
+            fullResponse += delta;
+            pendingAnswerTail += delta;
+            if (pendingAnswerTail.length > 64) {
+                const flushable = pendingAnswerTail.slice(0, -64);
+                if (flushable.length > 0) {
+                    process.stdout.write(flushable);
+                    renderedAnswerChars += flushable.length;
+                }
+                pendingAnswerTail = pendingAnswerTail.slice(-64);
+            }
+            showTypingEllipsis();
+        };
+
+        if (baseUrl) {
             const customAnswer = await streamCustomOpenAICompatibleResponse({
                 baseUrl,
                 apiKey,
                 modelId,
                 messages,
-                onDelta: (delta) => process.stdout.write(delta),
+                onDelta: onAnswerDelta,
                 signal: streamAbortController.signal,
             });
-            fullResponse = customAnswer;
-            if (fullResponse.length > 0) messages.push({ role: "assistant", content: fullResponse });
-            console.log("\n");
-            return;
+            if (fullResponse.length === 0 && customAnswer.length > 0) {
+                onAnswerDelta(customAnswer);
+            }
+        } else {
+            await reasoningStream({
+                messages,
+                provider,
+                model: modelId,
+                baseUrl,
+                apiKey,
+                // Always request visible reasoning; treat "off" as "low".
+                effort: reasoningEffort === "off" ? "low" : reasoningEffort,
+                debugEvents: false,
+                webSearch,
+                signal: streamAbortController.signal,
+                onReasoningDelta: (delta) => {
+                    if (userStopped) return;
+                    removeTypingEllipsis();
+                    sawReasoning = true;
+                    process.stdout.write(`${DIM_TEXT}${delta}${RESET_TEXT}`);
+                    showTypingEllipsis();
+                },
+                onAnswerDelta,
+            });
         }
-        
-        await reasoningStream({
-            messages,
-            provider,
-            model: modelId,
-            baseUrl,
-            apiKey,
-            // Always request visible reasoning; treat "off" as "low".
-            effort: reasoningEffort === "off" ? "low" : reasoningEffort,
-            debugEvents: false,
-            webSearch,
-            signal: streamAbortController.signal,
-            onReasoningDelta: (delta) => {
-                if (userStopped) return;
-                removeTypingEllipsis();
-                sawReasoning = true;
-                process.stdout.write(`${DIM_TEXT}${delta}${RESET_TEXT}`);
-                showTypingEllipsis();
-            },
-            onAnswerDelta: (delta) => {
-                if (userStopped) return;
-                removeTypingEllipsis();
-                if (!startedAnswer) {
-                    if (sawReasoning) {
-                        process.stdout.write("\n\n");
-                    }
-                    startedAnswer = true;
-                }
-                process.stdout.write(delta);
-                fullResponse += delta;
-                showTypingEllipsis();
-            },
-        });
 
         removeTypingEllipsis();
+
+        const { content: cleanedResponse, hasMarker } = stripRunMarker(fullResponse);
+        const remaining = cleanedResponse.slice(renderedAnswerChars);
+        if (remaining.length > 0) {
+            process.stdout.write(remaining);
+            renderedAnswerChars += remaining.length;
+        }
+        fullResponse = cleanedResponse;
+        pendingAnswerTail = "";
+        if (hasMarker && isSingleCommandResponse(fullResponse)) {
+            commandToRun = fullResponse.trim();
+        }
         
         // Add assistant response to history
         if (fullResponse.length > 0) messages.push({ role: "assistant", content: fullResponse });
@@ -1179,6 +1280,10 @@ async function streamChatResponse(
         const message = error instanceof Error ? error.message : String(error);
         const isAbort = userStopped || /abort/i.test(message);
         if (isAbort) {
+            if (pendingAnswerTail.length > 0) {
+                process.stdout.write(pendingAnswerTail);
+                pendingAnswerTail = "";
+            }
             if (fullResponse.length > 0) {
                 messages.push({ role: "assistant", content: fullResponse });
             }
@@ -1193,6 +1298,13 @@ async function streamChatResponse(
                 stdin.setRawMode(false);
                 stdin.pause();
             }
+        }
+    }
+
+    if (commandToRun) {
+        const didRun = await maybePromptToRunCommand(commandToRun);
+        if (didRun) {
+            process.exit(0);
         }
     }
 }

@@ -4,13 +4,26 @@ Mini AI Developer in your terminal, for quickly chatting with LLMs (OpenRouter o
 
 # Basic usage
 
-```bash
-$ maid convert m4a to wav
+```console
+$ maid convert skunks.m4a to wav
 Using qwen/qwen3-coder-next
 
-● Use FFmpeg:
+● ffmpeg -i skunks.m4a skunks.wav
 
-ffmpeg -i input.m4a output.wav
+Run command? y/n
+```
+
+or
+
+```console
+$ maid
+Using qwen/qwen3-coder-next
+
+> hey
+
+● Hello! How can I help you today?
+
+> 
 ```
 
 ## Run (dev)

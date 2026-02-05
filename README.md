@@ -2,6 +2,12 @@
 
 Mini AI Developer in your terminal, for quickly chatting with LLMs (OpenRouter or custom/local).
 
+# Features
+
+* Instantly ask for a command and run it
+* All OpenRouter models are listed the moment they come out, no app updates needed
+* Easily list Popular / Recent models on OpenRouter
+
 # Basic usage
 
 ```console

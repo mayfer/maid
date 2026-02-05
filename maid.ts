@@ -204,11 +204,143 @@ function stripRunMarker(response: string): { content: string; hasMarker: boolean
     return { content, hasMarker: true };
 }
 
-function isSingleCommandResponse(response: string): boolean {
-    const trimmed = response.trim();
+function extractRunnableCommand(response: string): string | undefined {
+    const normalized = response.replace(/\r\n/g, "\n");
+    const tagMatches = [...normalized.matchAll(/<command>([\s\S]*?)<\/command>/g)];
+    if (tagMatches.length > 0) {
+        const tagged = (tagMatches[tagMatches.length - 1]?.[1] || "").trim();
+        if (tagged) return tagged;
+    }
+
+    // Support commands emitted in fenced blocks, e.g.:
+    // ```bash
+    // command
+    // __RUN_COMMAND__
+    // ```
+    const fencedPattern = /```[a-zA-Z0-9_-]*\n([\s\S]*?)```/g;
+    for (const match of normalized.matchAll(fencedPattern)) {
+        const body = match[1] || "";
+        const lines = body.split("\n");
+        const markerIdx = lines.findIndex((line) => line.trim() === RUN_COMMAND_MARKER);
+        if (markerIdx === -1) continue;
+        const command = lines.slice(0, markerIdx).join("\n").trim();
+        if (command) return command;
+    }
+
+    const lines = normalized.split("\n");
+    for (let i = lines.length - 1; i >= 0; i--) {
+        if (lines[i].trim() !== RUN_COMMAND_MARKER) continue;
+
+        let end = i - 1;
+        while (end >= 0 && lines[end].trim() === "") end--;
+        if (end < 0) continue;
+
+        let start = end;
+        while (start - 1 >= 0 && lines[start - 1].trim() !== "") start--;
+        const command = lines.slice(start, i).join("\n").trim();
+        if (command) return command;
+    }
+
+    return undefined;
+}
+
+function createCommandTagStreamParser() {
+    const openTag = "<command>";
+    const closeTag = "</command>";
+    let pending = "";
+    let inCommand = false;
+    let commandBuffer = "";
+
+    const longestSuffixPrefixLen = (value: string, token: string): number => {
+        const max = Math.min(value.length, token.length - 1);
+        for (let len = max; len > 0; len--) {
+            if (value.slice(-len) === token.slice(0, len)) return len;
+        }
+        return 0;
+    };
+
+    const feed = (chunk: string): { visible: string; commands: string[] } => {
+        pending += chunk;
+        let visible = "";
+        const commands: string[] = [];
+
+        while (pending.length > 0) {
+            if (!inCommand) {
+                const idx = pending.indexOf(openTag);
+                if (idx === -1) {
+                    const keepLen = longestSuffixPrefixLen(pending, openTag);
+                    const flushLen = pending.length - keepLen;
+                    if (flushLen > 0) {
+                        visible += pending.slice(0, flushLen);
+                        pending = pending.slice(flushLen);
+                    }
+                    break;
+                }
+                if (idx > 0) visible += pending.slice(0, idx);
+                pending = pending.slice(idx + openTag.length);
+                inCommand = true;
+                commandBuffer = "";
+                continue;
+            }
+
+            const closeIdx = pending.indexOf(closeTag);
+            if (closeIdx === -1) {
+                const keepLen = longestSuffixPrefixLen(pending, closeTag);
+                const flushLen = pending.length - keepLen;
+                if (flushLen > 0) {
+                    const part = pending.slice(0, flushLen);
+                    commandBuffer += part;
+                    visible += part;
+                    pending = pending.slice(flushLen);
+                }
+                break;
+            }
+
+            if (closeIdx > 0) {
+                const part = pending.slice(0, closeIdx);
+                commandBuffer += part;
+                visible += part;
+            }
+            const command = commandBuffer.trim();
+            if (command) commands.push(command);
+            pending = pending.slice(closeIdx + closeTag.length);
+            inCommand = false;
+            commandBuffer = "";
+        }
+
+        return { visible, commands };
+    };
+
+    const flush = (): { visible: string; commands: string[] } => {
+        if (!inCommand) {
+            const out = pending;
+            pending = "";
+            return { visible: out, commands: [] };
+        }
+        const out = `${openTag}${commandBuffer}${pending}`;
+        pending = "";
+        commandBuffer = "";
+        inCommand = false;
+        return { visible: out, commands: [] };
+    };
+
+    return { feed, flush };
+}
+
+function looksExecutableShellCommand(command: string): boolean {
+    const trimmed = command.trim();
     if (!trimmed) return false;
-    if (trimmed.includes("\n")) return false;
-    if (trimmed.startsWith("```") || trimmed.endsWith("```")) return false;
+    if (trimmed.length > 300) return false;
+    if (/[.!?]$/.test(trimmed)) return false;
+
+    const firstToken = trimmed.split(/\s+/)[0] || "";
+    if (!firstToken) return false;
+    // Avoid accidentally executing natural-language sentences.
+    if (!/^[a-z0-9_./-]+$/.test(firstToken)) return false;
+    if (/[A-Z]/.test(firstToken)) return false;
+    if (firstToken === "i" || firstToken === "you" || firstToken === "please") return false;
+    if (["check", "visit", "try", "consider", "use"].includes(firstToken)) return false;
+
     return true;
 }
 
@@ -244,12 +376,57 @@ async function runCommand(command: string): Promise<void> {
 
 async function maybePromptToRunCommand(command: string): Promise<boolean> {
     if (!process.stdin.isTTY || !process.stdout.isTTY) return false;
-    const answer = (await promptForLine(`${DIM_TEXT}Run command? ${RESET_TEXT}${PRIMARY_TEXT}y/n${RESET_TEXT} `))?.trim().toLowerCase();
-    if (answer === "y") {
+    const shouldRun = await promptForRunCommandConfirmation(
+        `${DIM_TEXT}Run command? ${RESET_TEXT}${PRIMARY_TEXT}Enter${RESET_TEXT}${DIM_TEXT}/${RESET_TEXT}${PRIMARY_TEXT}Esc${RESET_TEXT} `,
+    );
+    if (shouldRun) {
         await runCommand(command);
         return true;
     }
     return false;
+}
+
+async function promptForRunCommandConfirmation(label: string): Promise<boolean> {
+    if (!process.stdin.isTTY || !process.stdout.isTTY) return false;
+    const stdin = process.stdin;
+    const stdout = process.stdout;
+    const wasRaw = Boolean((stdin as any).isRaw);
+
+    stdout.write(label);
+
+    return await new Promise<boolean>((resolve) => {
+        const finish = (value: boolean) => {
+            stdin.removeListener("data", onData);
+            if (!wasRaw) {
+                stdin.setRawMode(false);
+                stdin.pause();
+            }
+            resolve(value);
+        };
+
+        const onData = (chunk: string) => {
+            if (chunk === "\u0003") { // Ctrl+C
+                stdout.write("\n");
+                process.exit(130);
+            }
+            if (chunk === "\r" || chunk === "\n") {
+                stdout.write("\n");
+                finish(true);
+                return;
+            }
+            if (chunk === "\u001b") { // Esc
+                stdout.write("\n");
+                finish(false);
+            }
+        };
+
+        if (!wasRaw) {
+            stdin.setRawMode(true);
+            stdin.resume();
+            stdin.setEncoding("utf8");
+        }
+        stdin.on("data", onData);
+    });
 }
 
 async function ensureOpenRouterApiKeyConfigured(): Promise<void> {
@@ -1144,14 +1321,18 @@ async function streamChatResponse(
     messages.push({ role: "user", content: prompt });
 
     let fullResponse = "";
+    let rawResponse = "";
     let ellipsisVisible = false;
     let startedAssistantLine = false;
     let sawReasoning = false;
     let startedAnswer = false;
+    let sawAnyAnswerDelta = false;
     let userStopped = false;
     let pendingAnswerTail = "";
     let renderedAnswerChars = 0;
     let commandToRun: string | undefined;
+    let taggedCommand: string | undefined;
+    const commandTagParser = createCommandTagStreamParser();
     const streamAbortController = new AbortController();
     const stdin = process.stdin;
     const canListenForStop = Boolean(process.stdin.isTTY && process.stdout.isTTY);
@@ -1198,6 +1379,8 @@ async function streamChatResponse(
 
         const onAnswerDelta = (delta: string) => {
             if (userStopped) return;
+            sawAnyAnswerDelta = true;
+            rawResponse += delta;
             removeTypingEllipsis();
             if (!startedAnswer) {
                 if (sawReasoning) {
@@ -1206,8 +1389,17 @@ async function streamChatResponse(
                 startedAnswer = true;
             }
 
-            fullResponse += delta;
-            pendingAnswerTail += delta;
+            const { visible, commands } = commandTagParser.feed(delta);
+            if (commands.length > 0) {
+                taggedCommand = commands[commands.length - 1];
+            }
+            if (visible.length === 0) {
+                showTypingEllipsis();
+                return;
+            }
+
+            fullResponse += visible;
+            pendingAnswerTail += visible;
             if (pendingAnswerTail.length > 64) {
                 const flushable = pendingAnswerTail.slice(0, -64);
                 if (flushable.length > 0) {
@@ -1228,12 +1420,16 @@ async function streamChatResponse(
                 webSearch,
                 onToolCall: (toolName, args) => {
                     const query = typeof args?.query === "string" ? args.query : "";
-                    process.stdout.write(`\n${DIM_TEXT}[tool] ${toolName}${query ? `: ${query}` : ""}${RESET_TEXT}\n`);
+                    const error = typeof args?.error === "string" ? args.error : "";
+                    const details = error
+                        ? `${query ? `${query} ` : ""}${error}`.trim()
+                        : query;
+                    process.stdout.write(`\n${DIM_TEXT}[${toolName}]${details ? `: ${details}` : ""}${RESET_TEXT}\n`);
                 },
                 onDelta: onAnswerDelta,
                 signal: streamAbortController.signal,
             });
-            if (fullResponse.length === 0 && customAnswer.length > 0) {
+            if (!sawAnyAnswerDelta && customAnswer.length > 0) {
                 onAnswerDelta(customAnswer);
             }
         } else {
@@ -1260,6 +1456,10 @@ async function streamChatResponse(
         }
 
         removeTypingEllipsis();
+        const parserFlush = commandTagParser.flush();
+        if (parserFlush.visible.length > 0) {
+            fullResponse += parserFlush.visible;
+        }
         const { content: cleanedResponse, hasMarker } = stripRunMarker(fullResponse);
         const remaining = cleanedResponse.slice(renderedAnswerChars);
         if (remaining.length > 0) {
@@ -1268,8 +1468,13 @@ async function streamChatResponse(
         }
         fullResponse = cleanedResponse;
         pendingAnswerTail = "";
-        if (hasMarker && isSingleCommandResponse(fullResponse)) {
-            commandToRun = fullResponse.trim();
+        if (taggedCommand && looksExecutableShellCommand(taggedCommand)) {
+            commandToRun = taggedCommand;
+        } else {
+            const extractedCommand = extractRunnableCommand(rawResponse);
+            if (extractedCommand && (hasMarker || rawResponse.includes(RUN_COMMAND_MARKER)) && looksExecutableShellCommand(extractedCommand)) {
+                commandToRun = extractedCommand.trim();
+            }
         }
         
         // Add assistant response to history
@@ -1330,6 +1535,13 @@ async function streamCustomOpenAICompatibleResponse(opts: {
     const requestMessages: ToolCapableMessage[] = messages.some((m) => m.role === "system")
         ? [...messages]
         : [{ role: "system", content: DEFAULT_CHAT_SYSTEM_PROMPT } as const, ...messages];
+    if (opts.webSearch) {
+        const today = new Date().toISOString().slice(0, 10);
+        requestMessages.push({
+            role: "system",
+            content: `Web-search guidance: today is ${today}. For time-sensitive queries, prefer terms like latest/current/breaking and avoid forcing an exact date unless the user explicitly asks for one.`,
+        });
+    }
     const systemPrompt = requestMessages.find((m) => m.role === "system")?.content;
     if (process.env.MAID_DEBUG_SYSTEM_PROMPT === "1") {
         console.log(`[debug] system_prompt=${JSON.stringify(systemPrompt || "")}`);
@@ -1356,42 +1568,139 @@ async function streamCustomOpenAICompatibleResponse(opts: {
         },
     };
 
-    const fetchSearchResults = async (query: string, topK: number): Promise<string> => {
-        const url = new URL("https://api.duckduckgo.com/");
-        url.searchParams.set("q", query);
-        url.searchParams.set("format", "json");
-        url.searchParams.set("no_html", "1");
-        url.searchParams.set("no_redirect", "1");
-        url.searchParams.set("skip_disambig", "1");
-        const searchResp = await fetch(url.toString(), { signal: opts.signal });
-        if (!searchResp.ok) {
-            return JSON.stringify({ query, error: `search_failed:${searchResp.status}` });
+    const webSearchCache = new Map<string, string>();
+    const compactWebSnippetFromPayload = (raw: string): string | undefined => {
+        try {
+            const parsed: any = JSON.parse(raw);
+            const query = typeof parsed?.query === "string" ? parsed.query.trim() : "";
+            const results = Array.isArray(parsed?.results) ? parsed.results : [];
+            const lines = results
+                .slice(0, 5)
+                .map((item: any, idx: number) => {
+                    const title = typeof item?.title === "string" ? item.title.trim() : "";
+                    const snippet = typeof item?.snippet === "string" ? item.snippet.trim() : "";
+                    const url = typeof item?.url === "string" ? item.url.trim() : "";
+                    const core = [title, snippet].filter(Boolean).join(" — ");
+                    return core ? `${idx + 1}. ${core}${url ? ` (${url})` : ""}` : undefined;
+                })
+                .filter((v: string | undefined): v is string => Boolean(v));
+            if (lines.length === 0) return undefined;
+            return `${query ? `Query: ${query}\n` : ""}${lines.join("\n")}`;
+        } catch {
+            return undefined;
         }
-        const payload: any = await searchResp.json();
-        const related = Array.isArray(payload?.RelatedTopics) ? payload.RelatedTopics : [];
-        const flattened = related.flatMap((item: any) =>
-            Array.isArray(item?.Topics) ? item.Topics : [item],
-        );
-        const items = flattened
-            .filter((item: any) => typeof item?.Text === "string")
-            .slice(0, Math.max(1, Math.min(topK || 5, 8)))
-            .map((item: any) => ({
-                title: item.Text.split(" - ")[0] || item.Text,
-                snippet: item.Text,
-                url: item.FirstURL,
-            }));
-        const abstract = typeof payload?.AbstractText === "string" && payload.AbstractText.trim().length > 0
-            ? [{
-                title: payload.Heading || query,
-                snippet: payload.AbstractText,
-                url: payload.AbstractURL || undefined,
-            }]
-            : [];
-        return JSON.stringify({
-            query,
-            results: [...abstract, ...items].slice(0, Math.max(1, Math.min(topK || 5, 8))),
-            source: "duckduckgo_instant_answer",
+    };
+
+    const decodeHtml = (value: string): string => value
+        .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(Number(code)))
+        .replace(/&quot;/g, "\"")
+        .replace(/&#x27;/g, "'")
+        .replace(/&amp;/g, "&")
+        .replace(/&lt;/g, "<")
+        .replace(/&gt;/g, ">")
+        .replace(/&nbsp;/g, " ");
+
+    const stripHtml = (value: string): string => decodeHtml(value.replace(/<[^>]+>/g, " ")).replace(/\s+/g, " ").trim();
+
+    const resolveDuckDuckGoRedirect = (href: string): string => {
+        try {
+            const parsed = new URL(href, "https://duckduckgo.com");
+            const uddg = parsed.searchParams.get("uddg");
+            return uddg ? decodeURIComponent(uddg) : parsed.toString();
+        } catch {
+            return href;
+        }
+    };
+
+    const fetchHtmlSearchResults = async (query: string, topK: number): Promise<Array<{ title: string; snippet: string; url: string }>> => {
+        const htmlUrl = new URL("https://html.duckduckgo.com/html/");
+        htmlUrl.searchParams.set("q", query);
+        const htmlResp = await fetch(htmlUrl.toString(), {
+            signal: opts.signal,
+            headers: { Accept: "text/html" },
         });
+        if (!htmlResp.ok) return [];
+
+        const html = await htmlResp.text();
+        const titleMatches = [...html.matchAll(/<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi)];
+        const snippetMatches = [...html.matchAll(/<a[^>]*class="result__snippet"[^>]*>([\s\S]*?)<\/a>|<div[^>]*class="result__snippet"[^>]*>([\s\S]*?)<\/div>/gi)];
+        const limit = Math.max(1, Math.min(topK || 5, 8));
+        const out: Array<{ title: string; snippet: string; url: string }> = [];
+
+        for (let i = 0; i < Math.min(titleMatches.length, limit); i++) {
+            const href = titleMatches[i]?.[1] || "";
+            const rawTitle = titleMatches[i]?.[2] || "";
+            const rawSnippet = snippetMatches[i]?.[1] || snippetMatches[i]?.[2] || "";
+            const title = stripHtml(rawTitle);
+            const snippet = stripHtml(rawSnippet);
+            const url = resolveDuckDuckGoRedirect(href);
+            if (!title || !url) continue;
+            out.push({ title, snippet: snippet || title, url });
+        }
+        return out;
+    };
+
+    const fetchSearchResults = async (query: string, topK: number): Promise<string> => {
+        const limit = Math.max(1, Math.min(topK || 5, 8));
+        try {
+            const url = new URL("https://api.duckduckgo.com/");
+            url.searchParams.set("q", query);
+            url.searchParams.set("format", "json");
+            url.searchParams.set("no_html", "1");
+            url.searchParams.set("no_redirect", "1");
+            url.searchParams.set("skip_disambig", "1");
+            const searchResp = await fetch(url.toString(), { signal: opts.signal });
+            if (!searchResp.ok) {
+                return JSON.stringify({ query, error: `search_failed:${searchResp.status}` });
+            }
+            const payload: any = await searchResp.json();
+            const related = Array.isArray(payload?.RelatedTopics) ? payload.RelatedTopics : [];
+            const flattened = related.flatMap((item: any) =>
+                Array.isArray(item?.Topics) ? item.Topics : [item],
+            );
+            const items = flattened
+                .filter((item: any) => typeof item?.Text === "string")
+                .slice(0, limit)
+                .map((item: any) => ({
+                    title: item.Text.split(" - ")[0] || item.Text,
+                    snippet: item.Text,
+                    url: item.FirstURL,
+                }));
+            const abstract = typeof payload?.AbstractText === "string" && payload.AbstractText.trim().length > 0
+                ? [{
+                    title: payload.Heading || query,
+                    snippet: payload.AbstractText,
+                    url: payload.AbstractURL || undefined,
+                }]
+                : [];
+            const instantResults = [...abstract, ...items].slice(0, limit);
+            if (instantResults.length > 0) {
+                return JSON.stringify({
+                    query,
+                    results: instantResults,
+                    source: "duckduckgo_instant_answer",
+                });
+            }
+
+            const htmlResults = await fetchHtmlSearchResults(query, limit);
+            if (htmlResults.length > 0) {
+                return JSON.stringify({
+                    query,
+                    results: htmlResults,
+                    source: "duckduckgo_html",
+                });
+            }
+
+            return JSON.stringify({
+                query,
+                error: "no_results",
+                results: [],
+                source: "duckduckgo_html",
+            });
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            return JSON.stringify({ query, error: `search_error:${message}` });
+        }
     };
 
     const doChatCompletion = async (
@@ -1414,6 +1723,7 @@ async function streamCustomOpenAICompatibleResponse(opts: {
     // Tool-calling loop for OpenAI-compatible endpoints (e.g. LM Studio).
     if (opts.webSearch) {
         const toolMaxRounds = 3;
+        const webSnippets: string[] = [];
         for (let round = 0; round < toolMaxRounds; round++) {
             const payload: any = await doChatCompletion({
                 model: modelId,
@@ -1454,9 +1764,23 @@ async function streamCustomOpenAICompatibleResponse(opts: {
                 const query = typeof parsedArgs?.query === "string" ? parsedArgs.query.trim() : "";
                 const topK = Number.isFinite(Number(parsedArgs?.top_k)) ? Number(parsedArgs.top_k) : 5;
                 opts.onToolCall?.("web_search", { query, top_k: topK });
-                const result = query
-                    ? await fetchSearchResults(query, topK)
-                    : JSON.stringify({ error: "missing_query" });
+                let result: string;
+                if (!query) {
+                    result = JSON.stringify({ error: "missing_query" });
+                } else if (webSearchCache.has(query)) {
+                    result = webSearchCache.get(query)!;
+                } else {
+                    result = await fetchSearchResults(query, topK);
+                    webSearchCache.set(query, result);
+                }
+                const snippet = compactWebSnippetFromPayload(result);
+                if (snippet) webSnippets.push(snippet);
+                try {
+                    const parsedResult: any = JSON.parse(result);
+                    if (typeof parsedResult?.error === "string" && parsedResult.error.length > 0) {
+                        opts.onToolCall?.("web_search_error", { query, error: parsedResult.error });
+                    }
+                } catch {}
 
                 requestMessages.push({
                     role: "tool",
@@ -1466,7 +1790,45 @@ async function streamCustomOpenAICompatibleResponse(opts: {
                 });
             }
         }
-        return "I could not complete web search tool calls after multiple attempts.";
+        const fallbackMessages = requestMessages
+            .filter((m) => m.role !== "tool")
+            .map((m) => ({ role: m.role, content: m.content || "" }));
+        const fallbackContext = webSnippets.length > 0
+            ? webSnippets.slice(0, 6).join("\n\n")
+            : "No usable search snippets were returned.";
+
+        try {
+            const forcedFinal: any = await doChatCompletion({
+                model: modelId,
+                messages: [
+                    ...fallbackMessages,
+                    {
+                        role: "system",
+                        content: "You must answer now using the provided web search snippets. Do not call tools.",
+                    },
+                    {
+                        role: "user",
+                        content: `Web search snippets:\n${fallbackContext}\n\nReturn a concise final answer now.`,
+                    },
+                ],
+                stream: false,
+            });
+            const forcedContent = typeof forcedFinal?.choices?.[0]?.message?.content === "string"
+                ? forcedFinal.choices[0].message.content
+                : "";
+            if (forcedContent.trim().length > 0) {
+                opts.onDelta?.(forcedContent);
+                return forcedContent;
+            }
+        } catch {
+            // Fall through to textual snippet fallback below.
+        }
+
+        const snippetFallback = webSnippets.length > 0
+            ? `I couldn't get the model to stop tool-calling, but here are the latest web results I found:\n\n${webSnippets.slice(0, 6).join("\n\n")}`
+            : "I couldn't complete web search: the model kept requesting tools and no usable results were returned.";
+        opts.onDelta?.(snippetFallback);
+        return snippetFallback;
     }
 
     const response = await fetch(`${baseUrl}/chat/completions`, {

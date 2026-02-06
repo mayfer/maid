@@ -8,6 +8,8 @@ import {
     setCachedModelSelection,
     getConfiguredOpenRouterApiKey,
     setConfiguredOpenRouterApiKey,
+    getConfiguredSystemPrompt,
+    setConfiguredSystemPrompt,
     getCustomProviderConfig,
     setCustomProviderConfig,
     endpointPromptDefaultFromApiBase,
@@ -28,7 +30,8 @@ process.on("SIGINT", () => {
 });
 
 function getDefaultSystemPrompt(): string {
-    return buildPrompt(DEFAULT_CHAT_SYSTEM_PROMPT);
+    const configured = getConfiguredSystemPrompt();
+    return buildPrompt(configured || DEFAULT_CHAT_SYSTEM_PROMPT);
 }
 
 function stripRunMarker(response: string): { content: string; hasMarker: boolean } {
@@ -490,6 +493,7 @@ async function promptForModelSelection(): Promise<ModelSelection | string | unde
         initialOpenRouterApiKey: process.env.OPENROUTER_API_KEY?.trim() || getConfiguredOpenRouterApiKey(),
         initialCustomEndpoint: endpointPromptDefaultFromApiBase(customConfig.endpoint),
         initialCustomApiKey: customConfig.apiKey,
+        initialSystemPrompt: getConfiguredSystemPrompt() || "",
     });
 
     if (pickerResult.openrouterApiKey) {
@@ -500,6 +504,7 @@ async function promptForModelSelection(): Promise<ModelSelection | string | unde
         endpoint: pickerResult.customEndpoint,
         apiKey: pickerResult.customApiKey,
     });
+    setConfiguredSystemPrompt(pickerResult.systemPrompt);
 
     // Reinitialize stdin after Ink unmount so prompt loop remains alive.
     const stdin = process.stdin;

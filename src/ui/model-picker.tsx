@@ -1,11 +1,12 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { Box, Text, render, useInput } from "ink";
 import type { StandardizedModel } from "../../llm/index";
+import { DEFAULT_CHAT_SYSTEM_PROMPT } from "../../prompt";
 import { fetchCustomEndpointModels, fetchNewestOpenRouterModels, fetchPopularOpenRouterModels, validateOpenRouterApiKey } from "../model/sources";
 import { normalizeCustomEndpointToApiBase } from "../config";
 
-type Tab = "popular" | "newest" | "custom";
-type Mode = "browse" | "edit_openrouter_key" | "edit_custom_endpoint" | "edit_custom_key";
+type Tab = "popular" | "newest" | "custom" | "settings";
+type Mode = "browse" | "edit_openrouter_key" | "edit_custom_endpoint" | "edit_custom_key" | "edit_system_prompt";
 
 export interface ModelSelection {
   modelId: string;
@@ -20,6 +21,7 @@ export interface ModelPickerOutcome {
   openrouterApiKey?: string;
   customEndpoint: string;
   customApiKey?: string;
+  systemPrompt?: string;
   aborted?: boolean;
   cancelled?: boolean;
 }
@@ -29,25 +31,29 @@ interface ModelPickerProps {
   initialOpenRouterApiKey?: string;
   initialCustomEndpoint: string;
   initialCustomApiKey?: string;
+  initialSystemPrompt?: string;
   onDone: (result: ModelPickerOutcome) => void;
 }
 
 function tabLabel(tab: Tab): string {
   if (tab === "popular") return "Popular";
   if (tab === "newest") return "Newest";
-  return "Custom";
+  if (tab === "custom") return "Custom";
+  return "Settings";
 }
 
 function nextTab(tab: Tab): Tab {
   if (tab === "popular") return "newest";
   if (tab === "newest") return "custom";
+  if (tab === "custom") return "settings";
   return "popular";
 }
 
 function prevTab(tab: Tab): Tab {
   if (tab === "popular") return "custom";
   if (tab === "newest") return "popular";
-  return "newest";
+  if (tab === "custom") return "newest";
+  return "custom";
 }
 
 function normalizeInput(base: string): string {
@@ -64,6 +70,7 @@ function ModelPickerApp(props: ModelPickerProps) {
   const [openrouterApiKey, setOpenrouterApiKey] = useState(props.initialOpenRouterApiKey || "");
   const [customEndpoint, setCustomEndpoint] = useState(normalizeCustomEndpointToApiBase(props.initialCustomEndpoint));
   const [customApiKey, setCustomApiKey] = useState(props.initialCustomApiKey || "");
+  const [systemPrompt, setSystemPrompt] = useState(props.initialSystemPrompt || "");
 
   const [filter, setFilter] = useState("");
   const [shown, setShown] = useState(props.pageSize);
@@ -86,7 +93,8 @@ function ModelPickerApp(props: ModelPickerProps) {
   const baseModels = useMemo(() => {
     if (activeTab === "popular") return popularModels || [];
     if (activeTab === "newest") return newestModels || [];
-    return customModels || [];
+    if (activeTab === "custom") return customModels || [];
+    return [];
   }, [activeTab, popularModels, newestModels, customModels]);
 
   const matchingModels = useMemo(() => {
@@ -106,12 +114,6 @@ function ModelPickerApp(props: ModelPickerProps) {
     resetListCursor();
     setFilter("");
   }, [activeTab]);
-
-  useEffect(() => {
-    if ((activeTab === "popular" || activeTab === "newest") && !hasOpenRouterKey) {
-      setStatusLine("OpenRouter tabs require API key. Press 'k' to configure.");
-    }
-  }, [activeTab, hasOpenRouterKey]);
 
   useEffect(() => {
     if (activeTab !== "popular") return;
@@ -174,13 +176,9 @@ function ModelPickerApp(props: ModelPickerProps) {
   }, [activeTab, customEndpoint, customApiKey, customModels]);
 
   const handleInput = async (input: string, key: any) => {
-    if (key.ctrl && input === "c") {
-      props.onDone({
-        openrouterApiKey: openrouterApiKey || undefined,
-        customEndpoint,
-        customApiKey: customApiKey || undefined,
-        aborted: true,
-      });
+    if (input === "\u0003" || (key.ctrl && (input === "c" || input === "C"))) {
+      if (process.stdout.isTTY) process.stdout.write("\n");
+      process.exit(130);
       return;
     }
 
@@ -237,6 +235,9 @@ function ModelPickerApp(props: ModelPickerProps) {
           setCustomModels(undefined);
           setCustomError(undefined);
           setStatusLine(value ? "Saved custom API key." : "Custom API key cleared.");
+        } else if (mode === "edit_system_prompt") {
+          setSystemPrompt(value);
+          setStatusLine(value ? "Saved custom system prompt." : "Custom system prompt cleared.");
         }
         setMode("browse");
         setDraftValue("");
@@ -311,9 +312,12 @@ function ModelPickerApp(props: ModelPickerProps) {
       if (activeTab === "popular" || activeTab === "newest") {
         setMode("edit_openrouter_key");
         setDraftValue(openrouterApiKey);
-      } else {
+      } else if (activeTab === "custom") {
         setMode("edit_custom_endpoint");
         setDraftValue(customEndpoint.replace(/\/v1$/i, ""));
+      } else {
+        setMode("edit_system_prompt");
+        setDraftValue(systemPrompt);
       }
       return;
     }
@@ -327,6 +331,10 @@ function ModelPickerApp(props: ModelPickerProps) {
     }
 
     if (key.return) {
+      if (activeTab === "settings") {
+        setStatusLine("Press 'k' to edit the custom system prompt.");
+        return;
+      }
       const selected = filteredModels[selectedIndex];
       if (!selected) return;
 
@@ -346,7 +354,12 @@ function ModelPickerApp(props: ModelPickerProps) {
         openrouterApiKey: openrouterApiKey || undefined,
         customEndpoint,
         customApiKey: customApiKey || undefined,
+        systemPrompt: systemPrompt || undefined,
       });
+      return;
+    }
+
+    if (activeTab === "settings") {
       return;
     }
 
@@ -362,6 +375,7 @@ function ModelPickerApp(props: ModelPickerProps) {
   });
 
   const showOpenRouterWarning = (activeTab === "popular" || activeTab === "newest") && !hasOpenRouterKey;
+  const displayedSystemPrompt = systemPrompt || DEFAULT_CHAT_SYSTEM_PROMPT;
 
   const activeLoading = activeTab === "popular" ? popularLoading : activeTab === "newest" ? newestLoading : customLoading;
   const activeError = activeTab === "popular" ? popularError : activeTab === "newest" ? newestError : customError;
@@ -369,13 +383,13 @@ function ModelPickerApp(props: ModelPickerProps) {
   return (
     <Box flexDirection="column">
       <Box>
-        {["popular", "newest", "custom"].map((raw) => {
+        {["popular", "newest", "custom", "settings"].map((raw, index, all) => {
           const tab = raw as Tab;
           const active = tab === activeTab;
           return (
             <Text key={tab} color={active ? "cyan" : "gray"}>
               {active ? `[${tabLabel(tab)}]` : ` ${tabLabel(tab)} `}
-              <Text color="gray">{tab !== "custom" ? "  |  " : ""}</Text>
+              <Text color="gray">{index < all.length - 1 ? "  |  " : ""}</Text>
             </Text>
           );
         })}
@@ -383,7 +397,11 @@ function ModelPickerApp(props: ModelPickerProps) {
 
       <Box marginTop={1}>
         <Text>
-          {filter
+          {activeTab === "settings"
+            ? "Settings"
+            : showOpenRouterWarning
+            ? `OpenRouter setup required for ${tabLabel(activeTab)}`
+            : filter
             ? `Filter: "${filter}" (${Math.min(filteredModels.length, matchingModels.length)}/${matchingModels.length})`
             : `Pick a model from ${tabLabel(activeTab)} (${Math.min(shown, baseModels.length)}/${baseModels.length})`}
         </Text>
@@ -393,6 +411,20 @@ function ModelPickerApp(props: ModelPickerProps) {
         <Box flexDirection="column" marginTop={1}>
           <Text color="gray">Endpoint: {customEndpoint}</Text>
           <Text color="gray">API key: {customApiKey ? "[set]" : "[blank]"}</Text>
+        </Box>
+      )}
+
+      {activeTab === "settings" && (
+        <Box flexDirection="column" marginTop={1}>
+          <Text color="gray">System prompt: {systemPrompt ? "[custom]" : "[default]"}</Text>
+          <Text color="gray">
+            {systemPrompt
+              ? "Press 'k' to edit. Empty value restores built-in default prompt."
+              : "Using built-in default prompt. Press 'k' to set a custom one."}
+          </Text>
+          <Box marginTop={1}>
+            <Text>{displayedSystemPrompt}</Text>
+          </Box>
         </Box>
       )}
 
@@ -414,7 +446,7 @@ function ModelPickerApp(props: ModelPickerProps) {
         </Box>
       )}
 
-      {!activeLoading && !showOpenRouterWarning && (
+      {!activeLoading && !showOpenRouterWarning && activeTab !== "settings" && (
         <Box flexDirection="column" marginTop={1}>
           {filteredModels.length === 0 ? (
             <Text color="gray">No models match your filter.</Text>
@@ -442,7 +474,9 @@ function ModelPickerApp(props: ModelPickerProps) {
               ? "OpenRouter API key"
               : mode === "edit_custom_endpoint"
                 ? "Custom endpoint"
-                : "Custom API key (optional)"}
+                : mode === "edit_custom_key"
+                  ? "Custom API key (optional)"
+                  : "Custom system prompt"}
           </Text>
           <Box borderStyle="round" borderColor="cyan" paddingX={1}>
             <Text color="cyan">
@@ -469,6 +503,7 @@ export function runModelPicker(options: {
   initialOpenRouterApiKey?: string;
   initialCustomEndpoint: string;
   initialCustomApiKey?: string;
+  initialSystemPrompt?: string;
 }): Promise<ModelPickerOutcome> {
   return new Promise((resolve) => {
     let done = false;
@@ -478,6 +513,7 @@ export function runModelPicker(options: {
         initialOpenRouterApiKey={options.initialOpenRouterApiKey}
         initialCustomEndpoint={options.initialCustomEndpoint}
         initialCustomApiKey={options.initialCustomApiKey}
+        initialSystemPrompt={options.initialSystemPrompt}
         onDone={(result) => {
           if (done) return;
           done = true;

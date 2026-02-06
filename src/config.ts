@@ -19,6 +19,7 @@ export interface CachedModelSelection {
 
 export interface MaidConfig {
   modelSelection?: CachedModelSelection;
+  systemPrompt?: string;
   providers?: {
     openrouter?: {
       apiKey?: string;
@@ -85,9 +86,13 @@ function normalizeConfig(parsed: any): MaidConfig {
 
   const openrouterApiKey = nestedOpenRouterKey || legacyOpenRouterKey;
   const customEndpoint = nestedCustomEndpoint || legacyCustomEndpoint;
+  const systemPrompt = typeof parsed?.systemPrompt === "string" && parsed.systemPrompt.trim().length > 0
+    ? parsed.systemPrompt
+    : undefined;
 
   return {
     modelSelection: modelSelection?.modelId ? modelSelection : undefined,
+    systemPrompt,
     providers: {
       openrouter: {
         apiKey: openrouterApiKey || undefined,
@@ -116,12 +121,14 @@ export function readConfig(): MaidConfig {
 export function writeConfig(config: MaidConfig): void {
   ensureConfigDir();
 
+  const systemPrompt = config.systemPrompt?.trim() ? config.systemPrompt : undefined;
   const openrouterApiKey = config.providers?.openrouter?.apiKey?.trim() || config.openrouterApiKey?.trim() || undefined;
   const customEndpoint = config.providers?.custom?.endpoint?.trim() || config.customEndpoint?.trim() || undefined;
   const customApiKey = config.providers?.custom?.apiKey?.trim() || undefined;
 
   const cleanConfig: MaidConfig = {
     modelSelection: config.modelSelection?.modelId ? config.modelSelection : undefined,
+    systemPrompt,
     providers: {
       openrouter: {
         apiKey: openrouterApiKey,
@@ -189,6 +196,19 @@ export function setCachedModelSelection(selection: CachedModelSelection): void {
 export function getConfiguredOpenRouterApiKey(): string | undefined {
   const apiKey = readConfig().providers?.openrouter?.apiKey;
   return apiKey && apiKey.length > 0 ? apiKey : undefined;
+}
+
+export function getConfiguredSystemPrompt(): string | undefined {
+  const systemPrompt = readConfig().systemPrompt;
+  return systemPrompt && systemPrompt.trim().length > 0 ? systemPrompt : undefined;
+}
+
+export function setConfiguredSystemPrompt(systemPrompt?: string): void {
+  const value = systemPrompt?.trim() ? systemPrompt : undefined;
+  updateConfig((current) => ({
+    ...current,
+    systemPrompt: value,
+  }));
 }
 
 export function setConfiguredOpenRouterApiKey(apiKey: string): void {

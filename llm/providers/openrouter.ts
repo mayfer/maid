@@ -39,10 +39,15 @@ function getConfigApiKey(): string | undefined {
   try {
     if (!existsSync(MAID_CONFIG_FILE)) return undefined;
     const parsed: any = JSON.parse(readFileSync(MAID_CONFIG_FILE, "utf-8"));
-    const apiKey =
+    const nestedApiKey =
+      typeof parsed?.providers?.openrouter?.apiKey === "string"
+        ? parsed.providers.openrouter.apiKey.trim()
+        : "";
+    const legacyApiKey =
       typeof parsed?.openrouterApiKey === "string"
         ? parsed.openrouterApiKey.trim()
         : "";
+    const apiKey = nestedApiKey || legacyApiKey;
     return apiKey || undefined;
   } catch {
     return undefined;

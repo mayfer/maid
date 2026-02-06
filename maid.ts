@@ -1,18 +1,19 @@
 import { fetchModelsWithRanking, reasoningStream, getTopModels } from "./llm/index";
 import type { StandardizedModel, ChatMessage } from "./llm/index";
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
-import { homedir } from "os";
+import { readFileSync, existsSync } from "fs";
 import { spawn } from "child_process";
-import path from "path";
 import { buildPrompt, DEFAULT_CHAT_SYSTEM_PROMPT } from "./prompt";
+import {
+    getCachedModelSelection,
+    setCachedModelSelection,
+    getConfiguredOpenRouterApiKey,
+    setConfiguredOpenRouterApiKey,
+    getCustomProviderConfig,
+    setCustomProviderConfig,
+    endpointPromptDefaultFromApiBase,
+} from "./src/config";
+import { runModelPicker, type ModelSelection } from "./src/ui/model-picker";
 
-const LEGACY_CACHE_FILE = "/tmp/muchat_last_model.txt";
-const LEGACY_CACHE_SELECTION_FILE = "/tmp/muchat_last_model_selection.json";
-const LEGACY_CUSTOM_ENDPOINT_CACHE_FILE = "/tmp/muchat_custom_endpoint.txt";
-const CONFIG_DIR = path.join(homedir(), ".config");
-const CONFIG_FILE = path.join(CONFIG_DIR, "maid.json");
-const OPENROUTER_NEWEST_MODELS_URL = "https://openrouter.ai/api/frontend/models/find?order=newest";
-const DEFAULT_CUSTOM_ENDPOINT = "http://127.0.0.1:1234";
 const MODEL_PICKER_ABORT = "__MODEL_PICKER_ABORT__";
 const USER_PROMPT_LABEL = "\x1B[2m>\x1B[0m ";
 const PRIMARY_TEXT = "\x1B[36m";
@@ -21,170 +22,10 @@ const ASSISTANT_DOT = `${PRIMARY_TEXT}●${RESET_TEXT} `;
 const ASSISTANT_TYPING = "\x1B[2m…\x1B[0m";
 const DIM_TEXT = "\x1B[2m";
 const RUN_COMMAND_MARKER = "__RUN_COMMAND__";
-interface ModelSelection {
-    modelId: string;
-    provider: "openrouter" | "openai";
-    baseUrl?: string;
-    apiKey?: string;
-    cacheable: boolean;
-}
-
-interface CachedModelSelection {
-    modelId: string;
-    provider: "openrouter" | "openai";
-    baseUrl?: string;
-}
-
-interface MaidConfig {
-    modelSelection?: CachedModelSelection;
-    customEndpoint?: string;
-    openrouterApiKey?: string;
-}
-
-function ensureConfigDir(): void {
-    if (existsSync(CONFIG_DIR)) return;
-    mkdirSync(CONFIG_DIR, { recursive: true });
-}
-
-function readConfig(): MaidConfig {
-    try {
-        if (!existsSync(CONFIG_FILE)) return {};
-        const raw = readFileSync(CONFIG_FILE, "utf-8");
-        const parsed: any = JSON.parse(raw);
-        const modelSelection = parsed?.modelSelection && typeof parsed.modelSelection === "object"
-            ? {
-                modelId: typeof parsed.modelSelection.modelId === "string" ? parsed.modelSelection.modelId.trim() : "",
-                provider: parsed.modelSelection.provider === "openai" ? "openai" : "openrouter",
-                baseUrl: typeof parsed.modelSelection.baseUrl === "string" ? parsed.modelSelection.baseUrl.trim() : undefined,
-            }
-            : undefined;
-        const customEndpoint = typeof parsed?.customEndpoint === "string" ? parsed.customEndpoint.trim() : undefined;
-        const openrouterApiKey = typeof parsed?.openrouterApiKey === "string" ? parsed.openrouterApiKey.trim() : undefined;
-        return {
-            modelSelection: modelSelection?.modelId ? modelSelection : undefined,
-            customEndpoint: customEndpoint || undefined,
-            openrouterApiKey: openrouterApiKey || undefined,
-        };
-    } catch {
-        return {};
-    }
-}
-
-function writeConfig(config: MaidConfig): void {
-    ensureConfigDir();
-    const cleanConfig: MaidConfig = {
-        modelSelection: config.modelSelection?.modelId ? config.modelSelection : undefined,
-        customEndpoint: config.customEndpoint?.trim() || undefined,
-        openrouterApiKey: config.openrouterApiKey?.trim() || undefined,
-    };
-    writeFileSync(CONFIG_FILE, `${JSON.stringify(cleanConfig, null, 2)}\n`);
-}
-
-function updateConfig(updater: (current: MaidConfig) => MaidConfig): void {
-    const current = readConfig();
-    const next = updater(current);
-    writeConfig(next);
-}
-
-function normalizeCustomEndpointToApiBase(endpoint: string): string {
-    const raw = endpoint.trim() || DEFAULT_CUSTOM_ENDPOINT;
-    const prefixed = /^https?:\/\//i.test(raw) ? raw : `http://${raw}`;
-    const url = new URL(prefixed);
-
-    const cleanPath = url.pathname.replace(/\/+$/, "");
-    if (!cleanPath || cleanPath === "/") {
-        url.pathname = "/v1";
-    } else if (!/\/v1$/i.test(cleanPath)) {
-        url.pathname = `${cleanPath}/v1`;
-    } else {
-        url.pathname = cleanPath;
-    }
-
-    url.search = "";
-    url.hash = "";
-    return url.toString().replace(/\/$/, "");
-}
-
 process.on("SIGINT", () => {
     if (process.stdout.isTTY) process.stdout.write("\n");
     process.exit(130);
 });
-
-function getCachedModelSelection(): CachedModelSelection | undefined {
-    const configSelection = readConfig().modelSelection;
-    if (configSelection?.modelId) {
-        return configSelection;
-    }
-
-    try {
-        if (existsSync(LEGACY_CACHE_SELECTION_FILE)) {
-            const raw = readFileSync(LEGACY_CACHE_SELECTION_FILE, "utf-8");
-            const parsed: any = JSON.parse(raw);
-            const modelId = typeof parsed?.modelId === "string" ? parsed.modelId.trim() : "";
-            const provider = parsed?.provider === "openai" ? "openai" : "openrouter";
-            const baseUrl = typeof parsed?.baseUrl === "string" ? parsed.baseUrl.trim() : undefined;
-            if (modelId) {
-                const legacySelection = { modelId, provider, baseUrl };
-                updateConfig((current) => ({ ...current, modelSelection: legacySelection }));
-                return legacySelection;
-            }
-        }
-    } catch {}
-
-    // Backward compatibility with older cache format.
-    try {
-        if (existsSync(LEGACY_CACHE_FILE)) {
-            const modelId = readFileSync(LEGACY_CACHE_FILE, "utf-8").trim();
-            if (modelId.length > 0) {
-                const legacySelection = { modelId, provider: "openrouter" as const };
-                updateConfig((current) => ({ ...current, modelSelection: legacySelection }));
-                return legacySelection;
-            }
-        }
-    } catch {}
-    return undefined;
-}
-
-function setCachedModelSelection(selection: CachedModelSelection): void {
-    try {
-        updateConfig((current) => ({ ...current, modelSelection: selection }));
-    } catch {}
-}
-
-function getCachedCustomEndpoint(): string | undefined {
-    const configEndpoint = readConfig().customEndpoint;
-    if (configEndpoint) return configEndpoint;
-
-    try {
-        if (existsSync(LEGACY_CUSTOM_ENDPOINT_CACHE_FILE)) {
-            const value = readFileSync(LEGACY_CUSTOM_ENDPOINT_CACHE_FILE, "utf-8").trim();
-            if (value.length > 0) {
-                updateConfig((current) => ({ ...current, customEndpoint: value }));
-                return value;
-            }
-        }
-    } catch {}
-    return undefined;
-}
-
-function setCachedCustomEndpoint(baseUrl: string): void {
-    try {
-        updateConfig((current) => ({ ...current, customEndpoint: baseUrl }));
-    } catch {}
-}
-
-function getConfiguredOpenRouterApiKey(): string | undefined {
-    const apiKey = readConfig().openrouterApiKey;
-    return apiKey && apiKey.length > 0 ? apiKey : undefined;
-}
-
-function setConfiguredOpenRouterApiKey(apiKey: string): void {
-    updateConfig((current) => ({ ...current, openrouterApiKey: apiKey }));
-}
-
-function endpointPromptDefaultFromApiBase(baseUrl: string): string {
-    return baseUrl.replace(/\/v1$/i, "");
-}
 
 function getDefaultSystemPrompt(): string {
     return buildPrompt(DEFAULT_CHAT_SYSTEM_PROMPT);
@@ -344,46 +185,74 @@ function looksExecutableShellCommand(command: string): boolean {
     return true;
 }
 
-async function runCommand(command: string): Promise<void> {
-    await new Promise<void>((resolve) => {
+interface CommandRunResult {
+    exitCode: number | null;
+    stdout: string;
+    stderr: string;
+}
+
+async function runCommand(command: string): Promise<CommandRunResult> {
+    return await new Promise<CommandRunResult>((resolve) => {
         const child = spawn(command, { shell: true, stdio: ["inherit", "pipe", "pipe"] });
         let sawOutput = false;
         let lastOutputEndedWithNewline = true;
+        let stdoutCaptured = "";
+        let stderrCaptured = "";
+        let exitCode: number | null = null;
 
-        const handleChunk = (chunk: Buffer | string, writer: (s: string) => void) => {
+        const handleChunk = (chunk: Buffer | string, writer: (s: string) => void, capture: "stdout" | "stderr") => {
             const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
             if (!text) return;
             sawOutput = true;
             lastOutputEndedWithNewline = text.endsWith("\n");
+            if (capture === "stdout") stdoutCaptured += text;
+            else stderrCaptured += text;
             writer(text);
         };
 
-        child.stdout?.on("data", (chunk) => handleChunk(chunk, (s) => process.stdout.write(s)));
-        child.stderr?.on("data", (chunk) => handleChunk(chunk, (s) => process.stderr.write(s)));
+        child.stdout?.on("data", (chunk) => handleChunk(chunk, (s) => process.stdout.write(s), "stdout"));
+        child.stderr?.on("data", (chunk) => handleChunk(chunk, (s) => process.stderr.write(s), "stderr"));
 
         child.on("error", (error) => {
             console.error(`Failed to run command: ${error.message}`);
-            resolve();
+            resolve({ exitCode: 1, stdout: stdoutCaptured, stderr: `${stderrCaptured}${stderrCaptured ? "\n" : ""}${error.message}` });
         });
-        child.on("exit", () => {
+        child.on("exit", (code) => {
+            exitCode = code;
             if (process.stdout.isTTY && sawOutput && !lastOutputEndedWithNewline) {
                 process.stdout.write("\n");
             }
-            resolve();
+            resolve({ exitCode, stdout: stdoutCaptured, stderr: stderrCaptured });
         });
     });
 }
 
-async function maybePromptToRunCommand(command: string): Promise<boolean> {
+function summarizeCommandOutput(result: CommandRunResult): string {
+    const combined = `${result.stdout}${result.stderr ? `${result.stdout ? "\n" : ""}${result.stderr}` : ""}`.replace(/\r\n/g, "\n");
+    const lines = combined.split("\n");
+    const normalizedLines = lines.length > 0 && lines[lines.length - 1] === "" ? lines.slice(0, -1) : lines;
+    if (normalizedLines.length === 0) {
+        return "(no output)";
+    }
+    if (normalizedLines.length <= 100) {
+        return normalizedLines.join("\n");
+    }
+
+    const head = normalizedLines.slice(0, 50);
+    const tail = normalizedLines.slice(-50);
+    const skipped = normalizedLines.length - 100;
+    return `${head.join("\n")}\n... [${skipped} lines truncated] ...\n${tail.join("\n")}`;
+}
+
+async function maybePromptToRunCommand(command: string): Promise<CommandRunResult | undefined> {
     if (!process.stdin.isTTY || !process.stdout.isTTY) return false;
     const shouldRun = await promptForRunCommandConfirmation(
         `${DIM_TEXT}Run command? ${RESET_TEXT}${PRIMARY_TEXT}Enter${RESET_TEXT}${DIM_TEXT}/${RESET_TEXT}${PRIMARY_TEXT}Esc${RESET_TEXT} `,
     );
     if (shouldRun) {
-        await runCommand(command);
-        return true;
+        return await runCommand(command);
     }
-    return false;
+    return undefined;
 }
 
 async function promptForRunCommandConfirmation(label: string): Promise<boolean> {
@@ -440,15 +309,13 @@ async function ensureOpenRouterApiKeyConfigured(): Promise<void> {
     }
 
     if (!process.stdin.isTTY || !process.stdout.isTTY) {
-        console.error("Missing OPENROUTER_API_KEY. Run maid interactively once to store it in ~/.config/maid.json.");
-        process.exit(1);
+        throw new Error("Missing OPENROUTER_API_KEY. Run maid interactively once to store it in ~/.config/maid.json.");
     }
 
     const entered = await promptForLine("OPENROUTER_API_KEY: ");
     const apiKey = entered?.trim();
     if (!apiKey) {
-        console.error("OPENROUTER_API_KEY is required.");
-        process.exit(1);
+        throw new Error("OPENROUTER_API_KEY is required.");
     }
 
     setConfiguredOpenRouterApiKey(apiKey);
@@ -456,8 +323,6 @@ async function ensureOpenRouterApiKeyConfigured(): Promise<void> {
 }
 
 async function main() {
-    ensureConfigDir();
-
     const args = process.argv.slice(2);
     const firstArg = args[0];
 
@@ -474,7 +339,6 @@ async function main() {
     // No subcommands; default to chat behavior.
     if (!firstArg) {
         if (process.stdin.isTTY && process.stdout.isTTY) {
-            await ensureOpenRouterApiKeyConfigured();
             await chat([]);
         } else {
             printHelp();
@@ -482,7 +346,6 @@ async function main() {
         return;
     }
 
-    await ensureOpenRouterApiKeyConfigured();
     await chat(args);
 }
 
@@ -516,9 +379,9 @@ Examples:
 }
 
 async function promptForLine(label: string): Promise<string | undefined> {
-    if (!process.stdin.isTTY || !process.stdout.isTTY) return undefined;
     const stdin = process.stdin;
     const stdout = process.stdout;
+    if (typeof (stdin as any).setRawMode !== "function") return undefined;
     const wasRaw = Boolean((stdin as any).isRaw);
     let value = "";
     let inBracketedPaste = false;
@@ -604,390 +467,13 @@ async function promptForLine(label: string): Promise<string | undefined> {
 
         if (!wasRaw) {
             stdin.setRawMode(true);
-            stdin.resume();
-            stdin.setEncoding("utf8");
         }
-        stdin.on("data", onData);
-    });
-}
-
-async function promptForModelFromTop(rankings: any[], pageSize: number = 10): Promise<ModelSelection | string | undefined> {
-    if (!process.stdin.isTTY || !process.stdout.isTTY) return undefined;
-
-    const stdin = process.stdin;
-    const stdout = process.stdout;
-
-    const popularModels = rankings.map((r: any) => r.model as StandardizedModel);
-    let newestModels: StandardizedModel[] | undefined;
-    let customModels: StandardizedModel[] | undefined;
-    let activeList: "popular" | "newest" | "custom" = "popular";
-    let shown = Math.min(pageSize, popularModels.length);
-    let filter = "";
-    let selectedIndex = 0;
-    let canRender = true;
-
-    let customBaseUrl = getCachedCustomEndpoint() || normalizeCustomEndpointToApiBase(DEFAULT_CUSTOM_ENDPOINT);
-    let customApiKey: string | undefined;
-
-    let loadingNewest = false;
-    let newestLoadError: string | undefined;
-    let newestFetchController: AbortController | undefined;
-    let newestFetchSeq = 0;
-
-    let loadingCustom = false;
-    let customLoadError: string | undefined;
-    let customFetchController: AbortController | undefined;
-    let customFetchSeq = 0;
-
-    stdin.setRawMode(true);
-    stdin.resume();
-    stdin.setEncoding("utf8");
-
-    async function fetchNewestOpenRouterModels(signal?: AbortSignal): Promise<StandardizedModel[]> {
-        const headers: Record<string, string> = { Accept: "application/json" };
-        const referer = process.env.OPENROUTER_REFERRER || process.env.OPENROUTER_SITE_URL || process.env.SITE_URL;
-        const title = process.env.OPENROUTER_TITLE || process.env.OPENROUTER_APP_TITLE || process.env.APP_TITLE;
-        if (referer) headers["HTTP-Referer"] = referer;
-        if (title) headers["X-Title"] = title;
-
-        const response = await fetch(OPENROUTER_NEWEST_MODELS_URL, { headers, signal });
-        if (!response.ok) throw new Error(`OpenRouter newest models request failed (${response.status})`);
-
-        const payload: any = await response.json();
-        const rawModels = Array.isArray(payload?.data?.models) ? payload.data.models : (Array.isArray(payload?.models) ? payload.models : []);
-        const seen = new Set<string>();
-        const models: StandardizedModel[] = [];
-        for (const raw of rawModels) {
-            const baseId = raw?.slug || raw?.permaslug || raw?.canonical_slug || raw?.id || raw?.endpoint?.model;
-            if (!baseId) continue;
-            const isFreeVariant = typeof raw?.name === "string" && /\(free\)/i.test(raw.name);
-            const id = isFreeVariant && !baseId.endsWith(":free") ? `${baseId}:free` : baseId;
-            if (seen.has(id)) continue;
-            seen.add(id);
-            models.push({
-                id,
-                name: raw?.name || raw?.canonical_slug || id,
-                provider: "openrouter",
-                context_length: raw?.context_length,
-                created: typeof raw?.created_at === "number" ? raw.created_at : undefined,
-            });
+        // Ink can leave stdin paused after unmount; always resume before listening.
+        if (typeof (stdin as any).ref === "function") {
+            (stdin as any).ref();
         }
-        return models;
-    }
-
-    async function fetchCustomModels(baseUrl: string, apiKey?: string, signal?: AbortSignal): Promise<StandardizedModel[]> {
-        const ids = await fetchCustomEndpointModels(baseUrl, apiKey, signal);
-        return ids.map((id) => ({ id, name: id, provider: "openai" as const }));
-    }
-
-    function getBaseModels(): StandardizedModel[] {
-        if (activeList === "popular") return popularModels;
-        if (activeList === "newest") return newestModels || [];
-        return customModels || [];
-    }
-
-    function getMatchingModels(): StandardizedModel[] {
-        const all = getBaseModels();
-        if (!filter) return all;
-        const q = filter.toLowerCase();
-        return all.filter((m) => (m.name || m.id).toLowerCase().includes(q) || m.id.toLowerCase().includes(q));
-    }
-
-    function getFilteredModels(): StandardizedModel[] {
-        return getMatchingModels().slice(0, shown);
-    }
-
-    function cancelNewestLoad() {
-        newestFetchSeq++;
-        if (newestFetchController) newestFetchController.abort();
-        newestFetchController = undefined;
-        loadingNewest = false;
-    }
-
-    function cancelCustomLoad() {
-        customFetchSeq++;
-        if (customFetchController) customFetchController.abort();
-        customFetchController = undefined;
-        loadingCustom = false;
-    }
-
-    function startNewestLoad() {
-        if (newestModels || loadingNewest) return;
-        const seq = ++newestFetchSeq;
-        const controller = new AbortController();
-        newestFetchController = controller;
-        loadingNewest = true;
-        newestLoadError = undefined;
-        render();
-
-        fetchNewestOpenRouterModels(controller.signal)
-            .then((models) => {
-                if (seq !== newestFetchSeq) return;
-                newestModels = models;
-            })
-            .catch((error) => {
-                if (seq !== newestFetchSeq) return;
-                if (error instanceof Error && error.name === "AbortError") return;
-                newestModels = [];
-                newestLoadError = error instanceof Error ? error.message : String(error);
-            })
-            .finally(() => {
-                if (seq !== newestFetchSeq) return;
-                newestFetchController = undefined;
-                loadingNewest = false;
-                if (activeList === "newest") {
-                    shown = Math.min(pageSize, getBaseModels().length);
-                    selectedIndex = 0;
-                    render();
-                }
-            });
-    }
-
-    function startCustomLoad() {
-        if (loadingCustom) return;
-        const seq = ++customFetchSeq;
-        const controller = new AbortController();
-        customFetchController = controller;
-        loadingCustom = true;
-        customLoadError = undefined;
-        customModels = undefined;
-        render();
-
-        fetchCustomModels(customBaseUrl, customApiKey, controller.signal)
-            .then((models) => {
-                if (seq !== customFetchSeq) return;
-                customModels = models;
-            })
-            .catch((error) => {
-                if (seq !== customFetchSeq) return;
-                if (error instanceof Error && error.name === "AbortError") return;
-                customModels = [];
-                customLoadError = error instanceof Error ? error.message : String(error);
-            })
-            .finally(() => {
-                if (seq !== customFetchSeq) return;
-                customFetchController = undefined;
-                loadingCustom = false;
-                if (activeList === "custom") {
-                    shown = Math.min(pageSize, getBaseModels().length);
-                    selectedIndex = 0;
-                    render();
-                }
-            });
-    }
-
-    let lastLines: string[] = [];
-    function clearRenderedOutput() {
-        if (lastLines.length > 0) {
-            stdout.write(`\x1B[${lastLines.length}A`);
-            stdout.write("\x1B[J");
-            lastLines = [];
-        }
-    }
-
-    function render() {
-        if (!canRender) return;
-        const matches = getMatchingModels();
-        const filtered = getFilteredModels();
-        const lines: string[] = [];
-        const popularTab = activeList === "popular" ? `${PRIMARY_TEXT}[Popular]${RESET_TEXT}` : " Popular ";
-        const newestTab = activeList === "newest" ? `${PRIMARY_TEXT}[Newest]${RESET_TEXT}` : " Newest ";
-        const customTab = activeList === "custom" ? `${PRIMARY_TEXT}[Custom]${RESET_TEXT}` : " Custom ";
-        lines.push(`${popularTab}  |  ${newestTab}  |  ${customTab}   (use ← → to switch)`);
-        lines.push("");
-
-        if (filter) lines.push(`Filter: "${filter}" (showing ${Math.min(filtered.length, matches.length)} of ${matches.length} matches)`);
-        else lines.push(`Pick a model from ${activeList} (showing 1-${Math.min(shown, getBaseModels().length)} of ${getBaseModels().length}):`);
-        lines.push("");
-
-        if (activeList === "newest" && loadingNewest) {
-            lines.push("Loading newest models...");
-            lines.push("");
-        } else if (activeList === "newest" && newestLoadError) {
-            lines.push(`Could not load newest models: ${newestLoadError}`);
-            lines.push("");
-        } else if (activeList === "custom") {
-            lines.push(`Endpoint: ${customBaseUrl}`);
-            lines.push(`API key: ${customApiKey ? "[set]" : "[blank]"}`);
-            if (loadingCustom) lines.push("Loading custom models...");
-            if (customLoadError) lines.push(`Could not load custom models: ${customLoadError}`);
-            lines.push("");
-        }
-
-        if (filtered.length === 0) lines.push("No models match your filter.");
-        else {
-            filtered.forEach((m, i) => {
-                const prefix = i === selectedIndex ? `${PRIMARY_TEXT}>${RESET_TEXT} ` : "  ";
-                const itemNumber = `${DIM_TEXT}${i + 1})${RESET_TEXT}`;
-                lines.push(`${prefix}${itemNumber} ${m.name || m.id}`);
-            });
-        }
-
-        lines.push("");
-        lines.push("[↑↓] Navigate  [←→] Switch list  [Enter] Select  [Space] Show more  [e] Edit custom  [Esc] Cancel");
-        if (filter) lines.push("[Backspace] Clear filter  [Type] Filter models");
-        else lines.push("[Type] Filter by name");
-
-        clearRenderedOutput();
-        lines.forEach((line) => stdout.write(line + "\n"));
-        lastLines = lines;
-    }
-
-    return new Promise((resolve) => {
-        render();
-
-        const cleanup = () => {
-            cancelNewestLoad();
-            cancelCustomLoad();
-            stdin.setRawMode(false);
-            stdin.pause();
-            stdin.removeListener("data", onData);
-        };
-
-        const withLinePrompt = async <T>(runPrompt: () => Promise<T>): Promise<T> => {
-            stdin.removeListener("data", onData);
-            stdin.setRawMode(false);
-            stdin.pause();
-            canRender = false;
-            clearRenderedOutput();
-            try {
-                return await runPrompt();
-            } finally {
-                stdout.write("\n");
-                canRender = true;
-                stdin.setRawMode(true);
-                stdin.resume();
-                stdin.on("data", onData);
-            }
-        };
-
-        const configureCustomEndpoint = async (): Promise<boolean> => {
-            const configured = await withLinePrompt(async () => {
-                const endpointDefault = endpointPromptDefaultFromApiBase(customBaseUrl);
-                const endpoint = await promptForLine(`Custom endpoint [${endpointDefault}]: `);
-                const apiKey = await promptForLine("API key (optional): ");
-                customBaseUrl = normalizeCustomEndpointToApiBase(endpoint || endpointDefault);
-                customApiKey = apiKey || undefined;
-                setCachedCustomEndpoint(customBaseUrl);
-                return true;
-            });
-            return configured;
-        };
-
-        const switchTab = async (next: "popular" | "newest" | "custom") => {
-            if (next === activeList) return;
-            if (next !== "newest") cancelNewestLoad();
-            if (next !== "custom") cancelCustomLoad();
-            activeList = next;
-            filter = "";
-            shown = Math.min(pageSize, getBaseModels().length);
-            selectedIndex = 0;
-
-            if (activeList === "newest") startNewestLoad();
-            if (activeList === "custom" && !customModels && !loadingCustom) {
-                await configureCustomEndpoint();
-                startCustomLoad();
-            }
-            render();
-        };
-
-        const onData = async (key: string) => {
-            const filtered = getFilteredModels();
-
-            if (key === "\u0003") {
-                cleanup();
-                clearRenderedOutput();
-                stdout.write("\n");
-                resolve(MODEL_PICKER_ABORT);
-                return;
-            }
-
-            if (key === "\u001b") {
-                cleanup();
-                clearRenderedOutput();
-                stdout.write("\n");
-                resolve(undefined);
-                return;
-            }
-
-            if (key === "\r" || key === "\n") {
-                if (filtered.length > 0 && selectedIndex < filtered.length) {
-                    const selected = filtered[selectedIndex];
-                    cleanup();
-                    clearRenderedOutput();
-                    stdout.write(`${DIM_TEXT}Switched to ${RESET_TEXT}${selected.id}\n\n`);
-                    resolve({
-                        modelId: selected.id,
-                        provider: activeList === "custom" ? "openai" : "openrouter",
-                        baseUrl: activeList === "custom" ? customBaseUrl : undefined,
-                        apiKey: activeList === "custom" ? (customApiKey || "local") : undefined,
-                        cacheable: true,
-                    });
-                }
-                return;
-            }
-
-            if (key === " ") {
-                const maxItems = filter ? getMatchingModels().length : getBaseModels().length;
-                if (shown < maxItems) {
-                    shown = Math.min(shown + pageSize, maxItems);
-                    selectedIndex = 0;
-                    render();
-                }
-                return;
-            }
-
-            if (key === "\x7f" || key === "\b") {
-                if (filter.length > 0) {
-                    filter = filter.slice(0, -1);
-                    selectedIndex = 0;
-                    render();
-                }
-                return;
-            }
-
-            if (key === "\u001b[A") {
-                if (selectedIndex > 0) {
-                    selectedIndex--;
-                    render();
-                }
-                return;
-            }
-            if (key === "\u001b[B") {
-                if (selectedIndex < filtered.length - 1) {
-                    selectedIndex++;
-                    render();
-                }
-                return;
-            }
-            if (key === "\u001b[C") {
-                const next = activeList === "popular" ? "newest" : activeList === "newest" ? "custom" : "popular";
-                await switchTab(next);
-                return;
-            }
-            if (key === "\u001b[D") {
-                const prev = activeList === "popular" ? "custom" : activeList === "newest" ? "popular" : "newest";
-                await switchTab(prev);
-                return;
-            }
-
-            if (key === "e" || key === "E") {
-                if (activeList === "custom") {
-                    await configureCustomEndpoint();
-                    startCustomLoad();
-                    render();
-                }
-                return;
-            }
-
-            if (key.length === 1 && key.charCodeAt(0) >= 32 && key.charCodeAt(0) < 127) {
-                filter += key;
-                selectedIndex = 0;
-                render();
-                return;
-            }
-        };
-
+        stdin.resume();
+        stdin.setEncoding("utf8");
         stdin.on("data", onData);
     });
 }
@@ -998,27 +484,41 @@ function isModelSwitchCommand(input: string): boolean {
 }
 
 async function promptForModelSelection(): Promise<ModelSelection | string | undefined> {
-    let loadingLineShown = false;
-    try {
-        if (process.stdout.isTTY) {
-            process.stdout.write("Loading models...\n");
-            loadingLineShown = true;
-        }
-        const { rankings } = await fetchModelsWithRanking("openrouter");
-        if (loadingLineShown) {
-            process.stdout.write('\x1B[1A\x1B[2K\r');
-        }
-        const selected = await promptForModelFromTop(rankings, 10);
-        if (selected === MODEL_PICKER_ABORT) {
-            return MODEL_PICKER_ABORT;
-        }
-        return selected;
-    } catch (error) {
-        if (loadingLineShown) {
-            process.stdout.write('\x1B[1A\x1B[2K\r');
-        }
-        throw error;
+    const customConfig = getCustomProviderConfig();
+    const pickerResult = await runModelPicker({
+        pageSize: 10,
+        initialOpenRouterApiKey: process.env.OPENROUTER_API_KEY?.trim() || getConfiguredOpenRouterApiKey(),
+        initialCustomEndpoint: endpointPromptDefaultFromApiBase(customConfig.endpoint),
+        initialCustomApiKey: customConfig.apiKey,
+    });
+
+    if (pickerResult.openrouterApiKey) {
+        setConfiguredOpenRouterApiKey(pickerResult.openrouterApiKey);
+        process.env.OPENROUTER_API_KEY = pickerResult.openrouterApiKey;
     }
+    setCustomProviderConfig({
+        endpoint: pickerResult.customEndpoint,
+        apiKey: pickerResult.customApiKey,
+    });
+
+    // Reinitialize stdin after Ink unmount so prompt loop remains alive.
+    const stdin = process.stdin;
+    if (typeof (stdin as any).setRawMode === "function") {
+        try {
+            stdin.setRawMode(false);
+        } catch {}
+    }
+    if (typeof (stdin as any).ref === "function") {
+        try {
+            (stdin as any).ref();
+        } catch {}
+    }
+    stdin.resume();
+    stdin.setEncoding("utf8");
+
+    if (pickerResult.aborted) return MODEL_PICKER_ABORT;
+    if (pickerResult.cancelled) return undefined;
+    return pickerResult.selection;
 }
 
 async function listModels(args: string[]) {
@@ -1043,7 +543,25 @@ async function listModels(args: string[]) {
     }
 }
 
+function printUsingModel(modelId: string): void {
+    console.log(`${DIM_TEXT}Using ${RESET_TEXT}${modelId}`);
+}
+
+async function ensureProviderConfigured(provider: "openrouter" | "openai"): Promise<boolean> {
+    if (provider === "openrouter") {
+        try {
+            await ensureOpenRouterApiKeyConfigured();
+        } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            console.error(msg);
+            return false;
+        }
+    }
+    return true;
+}
+
 async function chat(args: string[]) {
+    const sessionIsInteractive = typeof (process.stdin as any).setRawMode === "function";
     const modelFlags = ["--model", "--models", "-m"];
     const modelIdx = args.findIndex((arg) =>
         modelFlags.includes(arg) ||
@@ -1156,6 +674,7 @@ async function chat(args: string[]) {
                         modelProvider = selection.provider;
                         modelBaseUrl = selection.baseUrl;
                         modelApiKey = selection.apiKey;
+                        printUsingModel(modelId);
                         if (selection.cacheable) setCachedModelSelection({ modelId, provider: modelProvider, baseUrl: modelBaseUrl });
                     } else if (!selection) {
                         const { rankings } = await fetchModelsWithRanking("openrouter");
@@ -1182,7 +701,7 @@ async function chat(args: string[]) {
             modelProvider = cachedSelection.provider;
             modelBaseUrl = cachedSelection.baseUrl;
             modelApiKey = undefined;
-            console.log(`${DIM_TEXT}Using ${RESET_TEXT}${modelId}`);
+            printUsingModel(modelId);
         } else {
             try {
                 usedPickerForInitialModel = true;
@@ -1195,6 +714,7 @@ async function chat(args: string[]) {
                     modelProvider = selection.provider;
                     modelBaseUrl = selection.baseUrl;
                     modelApiKey = selection.apiKey;
+                    printUsingModel(modelId);
                     if (selection.cacheable) setCachedModelSelection({ modelId, provider: modelProvider, baseUrl: modelBaseUrl });
                 } else if (!selection) {
                     const { rankings } = await fetchModelsWithRanking("openrouter");
@@ -1233,10 +753,7 @@ async function chat(args: string[]) {
     }
 
     // Interactive loop for messages
-    if (process.stdin.isTTY && process.stdout.isTTY) {
-        if (!usedPickerForInitialModel && !initialPrompt) {
-            console.log("");
-        }
+    if (sessionIsInteractive) {
         let firstPrompt = initialPrompt;
         
         // Resolve the first actionable input (prompt text or model-switch command)
@@ -1260,6 +777,7 @@ async function chat(args: string[]) {
                     modelProvider = selection.provider;
                     modelBaseUrl = selection.baseUrl;
                     modelApiKey = selection.apiKey;
+                    printUsingModel(modelId);
                     if (selection.cacheable) setCachedModelSelection({ modelId, provider: modelProvider, baseUrl: modelBaseUrl });
                 }
             } catch (error) {
@@ -1269,6 +787,8 @@ async function chat(args: string[]) {
         }
         
         // Process the first prompt
+        const providerReady = await ensureProviderConfigured(modelProvider);
+        if (!providerReady) return;
         await streamChatResponse(modelId, modelProvider, modelBaseUrl, modelApiKey, firstPrompt, messages, webSearch, reasoningEffort);
         
         // Continue with follow-up prompts
@@ -1294,6 +814,7 @@ async function chat(args: string[]) {
                         modelProvider = selection.provider;
                         modelBaseUrl = selection.baseUrl;
                         modelApiKey = selection.apiKey;
+                        printUsingModel(modelId);
                         if (selection.cacheable) setCachedModelSelection({ modelId, provider: modelProvider, baseUrl: modelBaseUrl });
                     }
                 } catch (error) {
@@ -1302,6 +823,10 @@ async function chat(args: string[]) {
                 continue;
             }
 
+            const providerReady = await ensureProviderConfigured(modelProvider);
+            if (!providerReady) {
+                continue;
+            }
             await streamChatResponse(modelId, modelProvider, modelBaseUrl, modelApiKey, prompt, messages, webSearch, reasoningEffort);
         }
     }
@@ -1510,9 +1035,26 @@ async function streamChatResponse(
     }
 
     if (commandToRun) {
-        const didRun = await maybePromptToRunCommand(commandToRun);
-        if (didRun) {
-            process.exit(0);
+        const runResult = await maybePromptToRunCommand(commandToRun);
+        if (runResult) {
+            const summarized = summarizeCommandOutput(runResult);
+            messages.push({
+                role: "user",
+                content: [
+                    `I ran this command:`,
+                    `\`\`\``,
+                    commandToRun,
+                    `\`\`\``,
+                    `Exit code: ${runResult.exitCode ?? "unknown"}`,
+                    `Output (truncated to first 50 and last 50 lines when long):`,
+                    `\`\`\``,
+                    summarized,
+                    `\`\`\``,
+                ].join("\n"),
+            });
+            if (process.stdout.isTTY) {
+                process.stdout.write("\n");
+            }
         }
     }
 }
@@ -1893,37 +1435,7 @@ async function streamCustomOpenAICompatibleResponse(opts: {
     return JSON.stringify(payload);
 }
 
-async function fetchCustomEndpointModels(baseUrl: string, apiKey?: string, signal?: AbortSignal): Promise<string[]> {
-    const headers: Record<string, string> = {
-        Accept: "application/json",
-    };
-    if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
-
-    const response = await fetch(`${baseUrl}/models`, { headers, signal });
-    if (!response.ok) {
-        const body = await response.text().catch(() => "");
-        throw new Error(`${response.status} ${response.statusText}${body ? `: ${body}` : ""}`);
-    }
-
-    const payload: any = await response.json();
-    const rawModels = Array.isArray(payload?.models)
-        ? payload.models
-        : Array.isArray(payload?.data)
-            ? payload.data
-            : Array.isArray(payload?.data?.models)
-                ? payload.data.models
-                : [];
-
-    const ids: string[] = [];
-    const seen = new Set<string>();
-    for (const item of rawModels) {
-        const id = typeof item === "string" ? item : (item?.id || item?.name);
-        if (!id || typeof id !== "string") continue;
-        if (seen.has(id)) continue;
-        seen.add(id);
-        ids.push(id);
-    }
-    return ids;
-}
-
-main();
+main().catch((error) => {
+    const msg = error instanceof Error ? error.stack || error.message : String(error);
+    console.error(msg);
+});

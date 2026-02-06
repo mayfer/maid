@@ -8,6 +8,14 @@ Mini AI Developer in your terminal, for quickly chatting with LLMs (OpenRouter o
 * All OpenRouter models are listed the moment they come out, no app updates needed
 * Easily list Popular / Recent models on OpenRouter
 
+# Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mayfer/maid/main/scripts/web_install.sh | bash
+```
+
+Supports macOS (Apple Silicon, Intel) and Linux (x86_64, ARM64).
+
 # Basic usage
 
 ```console

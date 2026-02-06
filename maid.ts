@@ -388,6 +388,7 @@ async function promptForLine(label: string): Promise<string | undefined> {
     const wasRaw = Boolean((stdin as any).isRaw);
     let value = "";
     let inBracketedPaste = false;
+    let renderedRows = 1;
 
     // Best-effort modified-enter detection (terminal dependent).
     const isLiteralNewlineKey = (key: string) =>
@@ -395,13 +396,37 @@ async function promptForLine(label: string): Promise<string | undefined> {
         key === "\u001b[13;2u" || // Shift+Enter (CSI u)
         key === "\u001b[13;9u"; // Cmd+Enter (CSI u in some terminals)
 
-    // Ensure render stays correct for multiline input and deletions.
+    const stripAnsi = (text: string) => text.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "");
+    const visualWidth = (text: string) => {
+        let width = 0;
+        for (const _ch of text) width++;
+        return width;
+    };
+    const rowsForRenderedText = (text: string) => {
+        const columns = Math.max(1, stdout.columns || 80);
+        return Math.max(
+            1,
+            text.split("\n").reduce((acc, line) => {
+                const lineWidth = visualWidth(stripAnsi(line));
+                return acc + Math.max(1, Math.ceil(lineWidth / columns));
+            }, 0)
+        );
+    };
+    const currentRenderedText = () => label + value;
+
+    // Ensure render stays correct for wrapped, multiline input and deletions.
     const clearAndRender = () => {
+        if (renderedRows > 1) {
+            stdout.write(`\x1B[${renderedRows - 1}A`);
+        }
         stdout.write("\r\x1B[J");
-        stdout.write(label + value);
+        const text = currentRenderedText();
+        stdout.write(text);
+        renderedRows = rowsForRenderedText(text);
     };
 
     stdout.write(label);
+    renderedRows = rowsForRenderedText(currentRenderedText());
 
     return await new Promise<string | undefined>((resolve) => {
         const finish = (result: string | undefined) => {
@@ -466,6 +491,7 @@ async function promptForLine(label: string): Promise<string | undefined> {
             const normalized = chunk.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
             value += normalized;
             stdout.write(normalized);
+            renderedRows = rowsForRenderedText(currentRenderedText());
         };
 
         if (!wasRaw) {

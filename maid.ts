@@ -384,6 +384,10 @@ Conversation history is maintained throughout the session.
 
 Stdin is supported: piped input is prepended to any arguments.
 
+When stdout is piped, maid emits only the assistant's plain text
+(no UI chrome, no colors, no reasoning trace). Informational
+messages go to stderr.
+
 Examples:
   maid                                 # Start interactive chat
   maid hi how are you                  # Unquoted args are joined as one prompt
@@ -393,6 +397,7 @@ Examples:
   maid hello -s ./prompt.txt          # System prompt from file
   echo "hello" | maid print this uppercase  # Stdin + args
   cat file.txt | maid summarize this       # Pipe file contents
+  maid "tell me a joke" | wc -l            # Pipe output to another command
 `);
 }
 
@@ -590,7 +595,8 @@ async function listModels(args: string[]) {
 }
 
 function printUsingModel(modelId: string): void {
-    console.log(`${DIM_TEXT}Using ${RESET_TEXT}${modelId}`);
+    const out = process.stdout.isTTY ? process.stdout : process.stderr;
+    out.write(`${DIM_TEXT}Using ${RESET_TEXT}${modelId}\n`);
 }
 
 async function ensureProviderConfigured(provider: "openrouter" | "openai"): Promise<boolean> {
@@ -607,7 +613,8 @@ async function ensureProviderConfigured(provider: "openrouter" | "openai"): Prom
 }
 
 async function chat(args: string[], stdinContent?: string) {
-    const sessionIsInteractive = typeof (process.stdin as any).setRawMode === "function";
+    const stdoutPiped = !process.stdout.isTTY;
+    const sessionIsInteractive = typeof (process.stdin as any).setRawMode === "function" && !stdoutPiped;
     const modelFlags = ["--model", "--models", "-m"];
     const modelIdx = args.findIndex((arg) =>
         modelFlags.includes(arg) ||
@@ -710,6 +717,10 @@ async function chat(args: string[], stdinContent?: string) {
             if (nextArg && !nextArg.startsWith("-")) {
                 // Model ID provided
                 modelId = nextArg;
+            } else if (stdoutPiped) {
+                // Can't show model picker when stdout is piped
+                console.error("--model requires a model ID when stdout is piped.");
+                return;
             } else {
                 // Model flag without argument - show picker
                 try {
@@ -733,7 +744,7 @@ async function chat(args: string[], stdinContent?: string) {
                             modelProvider = "openrouter";
                             modelBaseUrl = undefined;
                             modelApiKey = undefined;
-                            console.log(`${DIM_TEXT}Using top model: ${RESET_TEXT}${topModels[0].name || modelId}`);
+                            process.stderr.write(`${DIM_TEXT}Using top model: ${RESET_TEXT}${topModels[0].name || modelId}\n`);
                         }
                     }
                 } catch (error) {
@@ -751,6 +762,22 @@ async function chat(args: string[], stdinContent?: string) {
             modelBaseUrl = cachedSelection.baseUrl;
             modelApiKey = undefined;
             printUsingModel(modelId);
+        } else if (stdoutPiped) {
+            // Can't show model picker when stdout is piped; use top model
+            try {
+                const { rankings } = await fetchModelsWithRanking("openrouter");
+                const topModels = getTopModels(rankings, 1);
+                if (topModels.length > 0) {
+                    modelId = topModels[0].id;
+                    modelProvider = "openrouter";
+                    modelBaseUrl = undefined;
+                    modelApiKey = undefined;
+                    process.stderr.write(`${DIM_TEXT}Using top model: ${RESET_TEXT}${topModels[0].name || modelId}\n`);
+                }
+            } catch (error) {
+                console.error("Error fetching top models:", error);
+                return;
+            }
         } else {
             try {
                 usedPickerForInitialModel = true;
@@ -773,7 +800,7 @@ async function chat(args: string[], stdinContent?: string) {
                         modelProvider = "openrouter";
                         modelBaseUrl = undefined;
                         modelApiKey = undefined;
-                        console.log(`${DIM_TEXT}Using top model: ${RESET_TEXT}${topModels[0].name || modelId}`);
+                        process.stderr.write(`${DIM_TEXT}Using top model: ${RESET_TEXT}${topModels[0].name || modelId}\n`);
                     }
                 }
             } catch (error) {
@@ -902,6 +929,7 @@ async function streamChatResponse(
     // Add user message to history
     messages.push({ role: "user", content: prompt });
 
+    const isPiped = !process.stdout.isTTY;
     let fullResponse = "";
     let rawResponse = "";
     let ellipsisVisible = false;
@@ -937,12 +965,12 @@ async function streamChatResponse(
 
     const removeTypingEllipsis = () => {
         if (!ellipsisVisible) return;
-        process.stdout.write("\x1B[1D\x1B[0K");
+        if (!isPiped) process.stdout.write("\x1B[1D\x1B[0K");
         ellipsisVisible = false;
     };
 
     const showTypingEllipsis = () => {
-        if (ellipsisVisible) return;
+        if (isPiped || ellipsisVisible) return;
         process.stdout.write(ASSISTANT_TYPING);
         ellipsisVisible = true;
     };
@@ -955,9 +983,11 @@ async function streamChatResponse(
             stdin.on("data", onStreamKey);
         }
 
-        process.stdout.write(`\n${ASSISTANT_DOT}`);
-        startedAssistantLine = true;
-        showTypingEllipsis();
+        if (!isPiped) {
+            process.stdout.write(`\n${ASSISTANT_DOT}`);
+            startedAssistantLine = true;
+            showTypingEllipsis();
+        }
 
         const onAnswerDelta = (delta: string) => {
             if (userStopped) return;
@@ -965,7 +995,7 @@ async function streamChatResponse(
             rawResponse += delta;
             removeTypingEllipsis();
             if (!startedAnswer) {
-                if (sawReasoning) {
+                if (sawReasoning && !isPiped) {
                     process.stdout.write("\n\n");
                 }
                 startedAnswer = true;
@@ -1006,7 +1036,8 @@ async function streamChatResponse(
                     const details = error
                         ? `${query ? `${query} ` : ""}${error}`.trim()
                         : query;
-                    process.stdout.write(`\n${DIM_TEXT}[${toolName}]${details ? `: ${details}` : ""}${RESET_TEXT}\n`);
+                    const out = isPiped ? process.stderr : process.stdout;
+                    out.write(`\n${DIM_TEXT}[${toolName}]${details ? `: ${details}` : ""}${RESET_TEXT}\n`);
                 },
                 onDelta: onAnswerDelta,
                 signal: streamAbortController.signal,
@@ -1028,8 +1059,9 @@ async function streamChatResponse(
                 signal: streamAbortController.signal,
                 onReasoningDelta: (delta) => {
                     if (userStopped) return;
-                    removeTypingEllipsis();
                     sawReasoning = true;
+                    if (isPiped) return; // skip reasoning in pipe mode
+                    removeTypingEllipsis();
                     process.stdout.write(`${DIM_TEXT}${delta}${RESET_TEXT}`);
                     showTypingEllipsis();
                 },
@@ -1063,10 +1095,15 @@ async function streamChatResponse(
         if (fullResponse.length > 0) messages.push({ role: "assistant", content: fullResponse });
 
         // Keep spacing tight before command confirmation prompts.
-        process.stdout.write(commandToRun ? "\n" : "\n\n");
+        if (isPiped) {
+            // End with a single newline for clean pipe output
+            process.stdout.write("\n");
+        } else {
+            process.stdout.write(commandToRun ? "\n" : "\n\n");
+        }
     } catch (error) {
         removeTypingEllipsis();
-        if (startedAssistantLine) process.stdout.write("\n");
+        if (startedAssistantLine && !isPiped) process.stdout.write("\n");
         const message = error instanceof Error ? error.message : String(error);
         const isAbort = userStopped || /abort/i.test(message);
         if (isAbort) {
@@ -1077,7 +1114,7 @@ async function streamChatResponse(
             if (fullResponse.length > 0) {
                 messages.push({ role: "assistant", content: fullResponse });
             }
-            process.stdout.write(`${DIM_TEXT}[stopped]${RESET_TEXT}\n\n`);
+            if (!isPiped) process.stdout.write(`${DIM_TEXT}[stopped]${RESET_TEXT}\n\n`);
             return;
         }
         console.error(`Error during chat: ${message}`);
@@ -1091,7 +1128,7 @@ async function streamChatResponse(
         }
     }
 
-    if (commandToRun) {
+    if (commandToRun && !isPiped) {
         const runResult = await maybePromptToRunCommand(commandToRun);
         if (runResult) {
             const summarized = summarizeCommandOutput(runResult);

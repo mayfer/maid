@@ -40,6 +40,14 @@ Using qwen/qwen3-coder-next
 > 
 ```
 
+## Additional features
+
+* You can type `-m` anytime in chat mode to change model
+* Settings go in ~/.config/maid.json
+* Popular & newest OpenRouter models (or local models) are easily selectable
+* It will ask for OpenRouter API key if OPENROUTER_API_KEY env var is not set
+* Pipe input and ask about it: `echo "hello" | maid make this uppercase`
+
 ## Run (dev)
 
 From repo root:
@@ -63,10 +71,3 @@ Builds stand-alone executable in dist/maid
 ```bash
 ./scripts/install.sh
 ```
-
-## Additional features
-
-* You can type `-m` anytime in chat mode to change model
-* Settings go in ~/.config/maid.json
-* Popular & newest OpenRouter models (or local models) are easily selectable
-* It will ask for OpenRouter API key if OPENROUTER_API_KEY env var is not set

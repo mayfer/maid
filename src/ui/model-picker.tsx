@@ -308,7 +308,7 @@ function ModelPickerApp(props: ModelPickerProps) {
       return;
     }
 
-    if (input === "k" || input === "K") {
+    if (key.ctrl && (input === "k" || input === "K")) {
       if (activeTab === "popular" || activeTab === "newest") {
         setMode("edit_openrouter_key");
         setDraftValue(openrouterApiKey);
@@ -332,14 +332,14 @@ function ModelPickerApp(props: ModelPickerProps) {
 
     if (key.return) {
       if (activeTab === "settings") {
-        setStatusLine("Press 'k' to edit the custom system prompt.");
+        setStatusLine("Press Ctrl+K to edit the custom system prompt.");
         return;
       }
       const selected = filteredModels[selectedIndex];
       if (!selected) return;
 
       if ((activeTab === "popular" || activeTab === "newest") && !hasOpenRouterKey) {
-        setStatusLine("OpenRouter API key is required for this tab. Press 'k'.");
+        setStatusLine("OpenRouter API key is required for this tab. Press Ctrl+K.");
         return;
       }
 
@@ -419,8 +419,8 @@ function ModelPickerApp(props: ModelPickerProps) {
           <Text color="gray">System prompt: {systemPrompt ? "[custom]" : "[default]"}</Text>
           <Text color="gray">
             {systemPrompt
-              ? "Press 'k' to edit. Empty value restores built-in default prompt."
-              : "Using built-in default prompt. Press 'k' to set a custom one."}
+              ? "Press Ctrl+K to edit. Empty value restores built-in default prompt."
+              : "Using built-in default prompt. Press Ctrl+K to set a custom one."}
           </Text>
           <Box marginTop={1}>
             <Text>{displayedSystemPrompt}</Text>
@@ -430,7 +430,7 @@ function ModelPickerApp(props: ModelPickerProps) {
 
       {showOpenRouterWarning && (
         <Box marginTop={1}>
-          <Text color="yellow">OpenRouter key missing. Press 'k' to configure this tab group.</Text>
+          <Text color="yellow">OpenRouter key missing. Press Ctrl+K to configure this tab group.</Text>
         </Box>
       )}
 
@@ -485,13 +485,13 @@ function ModelPickerApp(props: ModelPickerProps) {
                 : draftValue) + "█"}
             </Text>
           </Box>
-          <Text color="gray">[Enter] Save  [Esc] Exit input</Text>
+          <Text color="gray">[Enter] Save · [Esc] Exit input</Text>
         </Box>
       )}
 
       <Box marginTop={1}>
         <Text color="gray">
-          [←→] Tabs [↑↓] Lists  [Space] More [Enter] Select [k] Configure [Esc] Reset
+          [←/→] Tabs · [↑/↓] List · [Space] More · [Enter] Select · [Ctrl+K] Configure · [Esc] Back
         </Text>
       </Box>
     </Box>

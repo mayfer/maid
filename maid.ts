@@ -339,8 +339,19 @@ async function main() {
         return;
     }
 
+    // Read stdin if piped (not a TTY)
+    let stdinContent: string | undefined;
+    if (!process.stdin.isTTY) {
+        const chunks: Buffer[] = [];
+        for await (const chunk of process.stdin) {
+            chunks.push(chunk);
+        }
+        const text = Buffer.concat(chunks).toString("utf-8").trim();
+        if (text.length > 0) stdinContent = text;
+    }
+
     // No subcommands; default to chat behavior.
-    if (!firstArg) {
+    if (!firstArg && !stdinContent) {
         if (process.stdin.isTTY && process.stdout.isTTY) {
             await chat([]);
         } else {
@@ -349,7 +360,7 @@ async function main() {
         return;
     }
 
-    await chat(args);
+    await chat(args, stdinContent);
 }
 
 function printHelp() {
@@ -371,6 +382,8 @@ Options:
 In interactive mode, chat continues until you type 'exit' or Ctrl+C.
 Conversation history is maintained throughout the session.
 
+Stdin is supported: piped input is prepended to any arguments.
+
 Examples:
   maid                                 # Start interactive chat
   maid hi how are you                  # Unquoted args are joined as one prompt
@@ -378,6 +391,8 @@ Examples:
   maid solve this --reasoning low      # Enable light reasoning
   maid hello --system "You are a pirate"  # String system prompt
   maid hello -s ./prompt.txt          # System prompt from file
+  echo "hello" | maid print this uppercase  # Stdin + args
+  cat file.txt | maid summarize this       # Pipe file contents
 `);
 }
 
@@ -591,7 +606,7 @@ async function ensureProviderConfigured(provider: "openrouter" | "openai"): Prom
     return true;
 }
 
-async function chat(args: string[]) {
+async function chat(args: string[], stdinContent?: string) {
     const sessionIsInteractive = typeof (process.stdin as any).setRawMode === "function";
     const modelFlags = ["--model", "--models", "-m"];
     const modelIdx = args.findIndex((arg) =>
@@ -662,7 +677,10 @@ async function chat(args: string[]) {
         }
         nonOptionArgs.push(args[i]);
     }
-    let initialPrompt = nonOptionArgs.length > 0 ? nonOptionArgs.join(" ") : undefined;
+    const argsPrompt = nonOptionArgs.length > 0 ? nonOptionArgs.join(" ") : undefined;
+    let initialPrompt = stdinContent && argsPrompt
+        ? `${stdinContent}\n${argsPrompt}`
+        : stdinContent || argsPrompt;
 
     if (systemIdx !== -1 && !systemValue && !initialPrompt) {
         console.log(systemPrompt);
@@ -781,6 +799,14 @@ async function chat(args: string[]) {
     // Add system prompt if provided
     if (systemPrompt) {
         messages.push({ role: "system", content: buildPrompt(systemPrompt) });
+    }
+
+    // Non-interactive one-shot mode (piped stdin or non-TTY)
+    if (!sessionIsInteractive && initialPrompt) {
+        const providerReady = await ensureProviderConfigured(modelProvider);
+        if (!providerReady) return;
+        await streamChatResponse(modelId, modelProvider, modelBaseUrl, modelApiKey, initialPrompt, messages, webSearch, reasoningEffort);
+        return;
     }
 
     // Interactive loop for messages

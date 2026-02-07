@@ -71,3 +71,16 @@ Builds stand-alone executable in dist/maid
 ```bash
 ./scripts/install.sh
 ```
+
+## Publish a new GitHub release
+
+```bash
+./scripts/release.sh
+```
+
+This script:
+- shows current version (from `package.json` and latest `v*` tag)
+- asks for the next version (defaults to patch bump)
+- updates `package.json`
+- builds all release binaries expected by `scripts/web_install.sh`
+- commits, tags, pushes, and creates the GitHub release

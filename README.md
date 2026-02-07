@@ -16,6 +16,12 @@ curl -fsSL https://raw.githubusercontent.com/mayfer/maid/main/scripts/web_instal
 
 Supports macOS (Apple Silicon, Intel) and Linux (x86_64, ARM64).
 
+Update to latest release:
+
+```bash
+maid --update
+```
+
 # Basic usage
 
 ```console

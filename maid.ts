@@ -24,6 +24,7 @@ const ASSISTANT_DOT = `${PRIMARY_TEXT}●${RESET_TEXT} `;
 const ASSISTANT_TYPING = "\x1B[2m…\x1B[0m";
 const DIM_TEXT = "\x1B[2m";
 const RUN_COMMAND_MARKER = "__RUN_COMMAND__";
+const WEB_INSTALL_COMMAND = "curl -fsSL https://raw.githubusercontent.com/mayfer/maid/main/scripts/web_install.sh | bash";
 process.on("SIGINT", () => {
     if (process.stdout.isTTY) process.stdout.write("\n");
     process.exit(130);
@@ -325,12 +326,25 @@ async function ensureOpenRouterApiKeyConfigured(): Promise<void> {
     process.env.OPENROUTER_API_KEY = apiKey;
 }
 
+async function runSelfUpdate(): Promise<void> {
+    console.error(`Running self-update:\n${WEB_INSTALL_COMMAND}`);
+    const result = await runCommand(WEB_INSTALL_COMMAND);
+    if (result.exitCode !== 0) {
+        throw new Error(`Self-update failed with exit code ${result.exitCode ?? "unknown"}.`);
+    }
+}
+
 async function main() {
     const args = process.argv.slice(2);
     const firstArg = args[0];
 
     if (firstArg === "help" || firstArg === "-h" || firstArg === "--help") {
         printHelp();
+        return;
+    }
+
+    if (firstArg === "update" || args.includes("--update")) {
+        await runSelfUpdate();
         return;
     }
 
@@ -375,6 +389,7 @@ Options:
   --models            (alias for --model)
   -m                  (alias for --model)
   --web               (enable web search)
+  --update            (self-update via web installer)
   --reasoning <level> (off, low, medium, high; default: low; off is treated as low)
   --system <prompt|file>  (alias: -s; system prompt as string or path to file)
                      (default file: prompts/default-system.txt)
@@ -395,6 +410,7 @@ Examples:
   maid solve this --reasoning low      # Enable light reasoning
   maid hello --system "You are a pirate"  # String system prompt
   maid hello -s ./prompt.txt          # System prompt from file
+  maid --update                        # Install newest release
   echo "hello" | maid print this uppercase  # Stdin + args
   cat file.txt | maid summarize this       # Pipe file contents
   maid "tell me a joke" | wc -l            # Pipe output to another command

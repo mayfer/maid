@@ -14,6 +14,32 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "$REPO_ROOT"
 
+NEW_VERSION_ARG=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --version)
+      NEW_VERSION_ARG="${2:-}"
+      if [[ -z "$NEW_VERSION_ARG" ]]; then
+        error "--version requires a value (x.y.z)"
+      fi
+      shift 2
+      ;;
+    -h|--help)
+      cat <<'EOF'
+Usage:
+  ./scripts/release.sh [--version x.y.z]
+
+Options:
+  --version x.y.z  Set release version non-interactively
+EOF
+      exit 0
+      ;;
+    *)
+      error "Unknown argument: $1"
+      ;;
+  esac
+done
+
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || error "Missing required command: $1"
 }
@@ -110,7 +136,10 @@ if [[ -n "$CURRENT_VERSION" ]]; then
   SUGGESTED_VERSION="$(next_patch "$CURRENT_VERSION" || true)"
 fi
 
-if [[ -n "$SUGGESTED_VERSION" ]]; then
+if [[ -n "$NEW_VERSION_ARG" ]]; then
+  NEW_VERSION="$NEW_VERSION_ARG"
+  info "Using version from --version: ${NEW_VERSION}"
+elif [[ -n "$SUGGESTED_VERSION" ]]; then
   read -r -p "Enter new version [${SUGGESTED_VERSION}]: " NEW_VERSION
   NEW_VERSION="${NEW_VERSION:-$SUGGESTED_VERSION}"
 else

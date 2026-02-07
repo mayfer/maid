@@ -59,7 +59,11 @@ latest_tag_version() {
 }
 
 package_version() {
-  bun -e 'const p=require("./package.json"); console.log(typeof p.version==="string" ? p.version : "")' 2>/dev/null || true
+  bun -e '
+    const fs=require("fs");
+    const pkg=JSON.parse(fs.readFileSync("package.json","utf8"));
+    console.log(typeof pkg.version==="string" ? pkg.version : "");
+  ' 2>/dev/null || true
 }
 
 next_patch() {
@@ -71,6 +75,22 @@ next_patch() {
     echo "${major}.${minor}.$((patch + 1))"
     return 0
   fi
+  return 1
+}
+
+semver_gt() {
+  local a="$1"
+  local b="$2"
+  [[ "$a" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || return 1
+  local a1="${BASH_REMATCH[1]}" a2="${BASH_REMATCH[2]}" a3="${BASH_REMATCH[3]}"
+  [[ "$b" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || return 0
+  local b1="${BASH_REMATCH[1]}" b2="${BASH_REMATCH[2]}" b3="${BASH_REMATCH[3]}"
+
+  (( a1 > b1 )) && return 0
+  (( a1 < b1 )) && return 1
+  (( a2 > b2 )) && return 0
+  (( a2 < b2 )) && return 1
+  (( a3 > b3 )) && return 0
   return 1
 }
 
@@ -120,7 +140,16 @@ fi
 
 CURRENT_PKG_VERSION="$(package_version)"
 CURRENT_TAG_VERSION="$(latest_tag_version)"
-CURRENT_VERSION="${CURRENT_PKG_VERSION:-$CURRENT_TAG_VERSION}"
+CURRENT_VERSION=""
+if [[ -n "$CURRENT_PKG_VERSION" && -n "$CURRENT_TAG_VERSION" ]]; then
+  if semver_gt "$CURRENT_PKG_VERSION" "$CURRENT_TAG_VERSION"; then
+    CURRENT_VERSION="$CURRENT_PKG_VERSION"
+  else
+    CURRENT_VERSION="$CURRENT_TAG_VERSION"
+  fi
+else
+  CURRENT_VERSION="${CURRENT_PKG_VERSION:-$CURRENT_TAG_VERSION}"
+fi
 
 if [[ -n "$CURRENT_PKG_VERSION" ]]; then
   info "Current package.json version: ${CURRENT_PKG_VERSION}"
@@ -129,6 +158,9 @@ else
 fi
 if [[ -n "$CURRENT_TAG_VERSION" ]]; then
   info "Latest git tag version: ${CURRENT_TAG_VERSION}"
+fi
+if [[ -n "$CURRENT_VERSION" ]]; then
+  info "Base version for suggestion: ${CURRENT_VERSION}"
 fi
 
 SUGGESTED_VERSION=""

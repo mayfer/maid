@@ -2,6 +2,7 @@ import { fetchModelsWithRanking, reasoningStream, getTopModels } from "./llm/ind
 import type { StandardizedModel, ChatMessage } from "./llm/index";
 import { readFileSync, existsSync } from "fs";
 import { spawn } from "child_process";
+import packageJson from "./package.json";
 import { buildPrompt, DEFAULT_CHAT_SYSTEM_PROMPT } from "./prompt";
 import {
     getCachedModelSelection,
@@ -25,10 +26,38 @@ const ASSISTANT_TYPING = "\x1B[2m…\x1B[0m";
 const DIM_TEXT = "\x1B[2m";
 const RUN_COMMAND_MARKER = "__RUN_COMMAND__";
 const WEB_INSTALL_COMMAND = "curl -fsSL https://raw.githubusercontent.com/mayfer/maid/main/scripts/web_install.sh | bash";
+const RELEASES_LATEST_URL = "https://api.github.com/repos/mayfer/maid/releases/latest";
+const MAID_VERSION = normalizeVersion(typeof (packageJson as any)?.version === "string" ? (packageJson as any).version : "") || "unknown";
 process.on("SIGINT", () => {
     if (process.stdout.isTTY) process.stdout.write("\n");
     process.exit(130);
 });
+
+function getCurrentVersion(): string {
+    return MAID_VERSION;
+}
+
+function normalizeVersion(raw: string): string {
+    return raw.trim().replace(/^v/i, "");
+}
+
+async function getLatestReleaseVersion(): Promise<string | undefined> {
+    try {
+        const res = await fetch(RELEASES_LATEST_URL, {
+            headers: {
+                "Accept": "application/vnd.github+json",
+                "User-Agent": "maid-cli",
+            },
+        });
+        if (!res.ok) return undefined;
+        const body = await res.json() as { tag_name?: string };
+        if (typeof body.tag_name !== "string") return undefined;
+        const normalized = normalizeVersion(body.tag_name);
+        return normalized || undefined;
+    } catch {
+        return undefined;
+    }
+}
 
 function getDefaultSystemPrompt(): string {
     const configured = getConfiguredSystemPrompt();
@@ -327,6 +356,13 @@ async function ensureOpenRouterApiKeyConfigured(): Promise<void> {
 }
 
 async function runSelfUpdate(): Promise<void> {
+    const currentVersion = getCurrentVersion();
+    const latestVersion = await getLatestReleaseVersion();
+    if (latestVersion && currentVersion !== "unknown" && normalizeVersion(currentVersion) === normalizeVersion(latestVersion)) {
+        console.error(`Already up to date (v${currentVersion}).`);
+        return;
+    }
+
     console.error(`Running self-update:\n${WEB_INSTALL_COMMAND}`);
     const result = await runCommand(WEB_INSTALL_COMMAND);
     if (result.exitCode !== 0) {
@@ -340,6 +376,11 @@ async function main() {
 
     if (firstArg === "help" || firstArg === "-h" || firstArg === "--help") {
         printHelp();
+        return;
+    }
+
+    if (firstArg === "version" || firstArg === "-v" || firstArg === "--version" || args.includes("--version")) {
+        console.log(getCurrentVersion());
         return;
     }
 
@@ -378,16 +419,21 @@ async function main() {
 }
 
 function printHelp() {
+    const version = getCurrentVersion();
     console.log(`
 Usage:
   maid [prompt...] [options]
   bun maid.ts [prompt...] [options]
+
+Version:
+  ${version}
 
 Options:
   --model <model_id>  (alias: --models, -m)
   --model             (show model picker to select new model)
   --models            (alias for --model)
   -m                  (alias for --model)
+  --version           (print current version)
   --web               (enable web search)
   --update            (self-update via web installer)
   --reasoning <level> (off, low, medium, high; default: low; off is treated as low)
@@ -410,6 +456,7 @@ Examples:
   maid solve this --reasoning low      # Enable light reasoning
   maid hello --system "You are a pirate"  # String system prompt
   maid hello -s ./prompt.txt          # System prompt from file
+  maid --version                       # Print current version
   maid --update                        # Install newest release
   echo "hello" | maid print this uppercase  # Stdin + args
   cat file.txt | maid summarize this       # Pipe file contents

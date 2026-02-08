@@ -42,9 +42,15 @@ fi
 
 cd "$REPO_ROOT"
 
-SIGN_IDENTITY="${MACOS_SIGN_IDENTITY:--}"
+DEFAULT_SIGN_IDENTITY="Developer ID Application: Murat Ayfer (2463KXRFPH)"
+SIGN_IDENTITY="${MACOS_SIGN_IDENTITY:-$DEFAULT_SIGN_IDENTITY}"
 BINARY_PATH="dist/maid"
 INSTALL_PATH="$HOME/.local/bin/maid"
+
+if [[ -z "${MACOS_SIGN_IDENTITY:-}" ]]; then
+    echo -e "${YELLOW}⚠ Using default signing identity: ${DEFAULT_SIGN_IDENTITY}${NC}"
+    echo -e "${YELLOW}  Set MACOS_SIGN_IDENTITY to override (example: MACOS_SIGN_IDENTITY='-' ./scripts/install.sh)${NC}"
+fi
 
 # Build the native binary (installed locally)
 echo -e "${YELLOW}→ Compiling (native)...${NC}"

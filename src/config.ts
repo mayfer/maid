@@ -13,7 +13,7 @@ const CONFIG_FILE = path.join(CONFIG_DIR, "maid.json");
 
 export interface CachedModelSelection {
   modelId: string;
-  provider: "openrouter" | "openai";
+  provider: "openrouter" | "openai_compatible_v1";
   baseUrl?: string;
 }
 
@@ -62,7 +62,10 @@ function normalizeConfig(parsed: any): MaidConfig {
   const modelSelection = parsed?.modelSelection && typeof parsed.modelSelection === "object"
     ? {
         modelId: typeof parsed.modelSelection.modelId === "string" ? parsed.modelSelection.modelId.trim() : "",
-        provider: parsed.modelSelection.provider === "openai" ? "openai" : "openrouter",
+        provider:
+          parsed.modelSelection.provider === "openai_compatible_v1" || parsed.modelSelection.provider === "openai"
+            ? "openai_compatible_v1"
+            : "openrouter",
         baseUrl: typeof parsed.modelSelection.baseUrl === "string" ? parsed.modelSelection.baseUrl.trim() : undefined,
       }
     : undefined;
@@ -163,7 +166,10 @@ export function getCachedModelSelection(): CachedModelSelection | undefined {
       const raw = readFileSync(LEGACY_CACHE_SELECTION_FILE, "utf-8");
       const parsed: any = JSON.parse(raw);
       const modelId = typeof parsed?.modelId === "string" ? parsed.modelId.trim() : "";
-      const provider = parsed?.provider === "openai" ? "openai" : "openrouter";
+      const provider =
+        parsed?.provider === "openai_compatible_v1" || parsed?.provider === "openai"
+          ? "openai_compatible_v1"
+          : "openrouter";
       const baseUrl = typeof parsed?.baseUrl === "string" ? parsed.baseUrl.trim() : undefined;
       if (modelId) {
         const legacySelection = { modelId, provider, baseUrl };

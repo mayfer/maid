@@ -662,7 +662,7 @@ function printUsingModel(modelId: string): void {
     out.write(`${DIM_TEXT}Using ${RESET_TEXT}${modelId}\n`);
 }
 
-async function ensureProviderConfigured(provider: "openrouter" | "openai"): Promise<boolean> {
+async function ensureProviderConfigured(provider: "openrouter" | "openai_compatible_v1"): Promise<boolean> {
     if (provider === "openrouter") {
         try {
             await ensureOpenRouterApiKeyConfigured();
@@ -762,7 +762,7 @@ async function chat(args: string[], stdinContent?: string) {
     }
 
     let modelId: string | undefined;
-    let modelProvider: "openrouter" | "openai" = "openrouter";
+    let modelProvider: "openrouter" | "openai_compatible_v1" = "openrouter";
     let modelBaseUrl: string | undefined;
     let modelApiKey: string | undefined;
     let usedPickerForInitialModel = false;
@@ -823,7 +823,12 @@ async function chat(args: string[], stdinContent?: string) {
             modelId = cachedSelection.modelId;
             modelProvider = cachedSelection.provider;
             modelBaseUrl = cachedSelection.baseUrl;
-            modelApiKey = undefined;
+            if (cachedSelection.provider === "openai_compatible_v1" && cachedSelection.baseUrl) {
+                // Restore saved custom endpoint key across sessions for cached custom selections.
+                modelApiKey = getCustomProviderConfig().apiKey;
+            } else {
+                modelApiKey = undefined;
+            }
             printUsingModel(modelId);
         } else if (stdoutPiped) {
             // Can't show model picker when stdout is piped; use top model
@@ -981,7 +986,7 @@ async function chat(args: string[], stdinContent?: string) {
 
 async function streamChatResponse(
     modelId: string,
-    provider: "openrouter" | "openai",
+    provider: "openrouter" | "openai_compatible_v1",
     baseUrl: string | undefined,
     apiKey: string | undefined,
     prompt: string,
@@ -1111,7 +1116,7 @@ async function streamChatResponse(
         } else {
             await reasoningStream({
                 messages,
-                provider,
+                provider: provider === "openai_compatible_v1" ? "openai" : provider,
                 model: modelId,
                 baseUrl,
                 apiKey,

@@ -78,8 +78,8 @@ This spec documents the current implemented behavior for:
 - Stores normalized custom base URL.
 - Used as default value when configuring Custom tab.
 
-### Not cached
-- Custom API key is intentionally not persisted.
+### Cached custom API key
+- Custom API key is persisted in `~/.config/maid.json` under `providers.custom.apiKey`.
 
 ---
 
@@ -112,7 +112,7 @@ This spec documents the current implemented behavior for:
 
 ### Provider routing
 - OpenRouter tabs use provider `openrouter`.
-- Custom tab selections use provider `openai` with overridden `baseUrl` and optional `apiKey`.
+- Custom tab selections use provider `openai_compatible_v1` with overridden `baseUrl` and optional `apiKey`.
 
 ---
 

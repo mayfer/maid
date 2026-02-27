@@ -10,7 +10,7 @@ type Mode = "browse" | "edit_openrouter_key" | "edit_custom_endpoint" | "edit_cu
 
 export interface ModelSelection {
   modelId: string;
-  provider: "openrouter" | "openai";
+  provider: "openrouter" | "openai_compatible_v1";
   baseUrl?: string;
   apiKey?: string;
   cacheable: boolean;
@@ -346,7 +346,7 @@ function ModelPickerApp(props: ModelPickerProps) {
       props.onDone({
         selection: {
           modelId: selected.id,
-          provider: activeTab === "custom" ? "openai" : "openrouter",
+          provider: activeTab === "custom" ? "openai_compatible_v1" : "openrouter",
           baseUrl: activeTab === "custom" ? customEndpoint : undefined,
           apiKey: activeTab === "custom" ? (customApiKey || "local") : undefined,
           cacheable: true,
